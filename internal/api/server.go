@@ -705,9 +705,42 @@ func (s *Server) proxyHTTPForTarget(w http.ResponseWriter, r *http.Request, targ
 		status = 502
 	}
 	data, _ := base64.StdEncoding.DecodeString(response.Body)
+	data = injectBrowserCompatibility(response.Headers, data)
+	if len(data) > 0 {
+		// The body may have changed after HTML compatibility injection.
+		w.Header().Del("Content-Length")
+	}
 	w.WriteHeader(status)
 	_, _ = w.Write(data)
 }
+func injectBrowserCompatibility(headers map[string]string, data []byte) []byte {
+	contentType := ""
+	contentEncoding := ""
+	for name, value := range headers {
+		switch strings.ToLower(name) {
+		case "content-type":
+			contentType = value
+		case "content-encoding":
+			contentEncoding = value
+		}
+	}
+	if !strings.Contains(strings.ToLower(contentType), "text/html") || contentEncoding != "" {
+		return data
+	}
+	lower := strings.ToLower(string(data))
+	head := strings.Index(lower, "<head")
+	if head < 0 {
+		return data
+	}
+	end := strings.Index(lower[head:], ">")
+	if end < 0 {
+		return data
+	}
+	insertAt := head + end + 1
+	const script = `<script>(function(){try{if(window.crypto&&typeof window.crypto.randomUUID!=="function"&&window.crypto.getRandomValues){var f=function(){var b=new Uint8Array(16);window.crypto.getRandomValues(b);b[6]=(b[6]&15)|64;b[8]=(b[8]&63)|128;var h=Array.prototype.map.call(b,function(x){return("0"+x.toString(16)).slice(-2)}).join("");return h.slice(0,8)+"-"+h.slice(8,12)+"-"+h.slice(12,16)+"-"+h.slice(16,20)+"-"+h.slice(20)};try{Object.defineProperty(window.crypto,"randomUUID",{value:f,configurable:true})}catch(e){}}}catch(e){}})();</script>`
+	return append(append(append([]byte{}, data[:insertAt]...), []byte(script)...), data[insertAt:]...)
+}
+
 func isHopHeader(name string) bool {
 	switch strings.ToLower(name) {
 	case "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade", "host":

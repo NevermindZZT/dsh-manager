@@ -1,6 +1,6 @@
 # dsh-manager
 
-![Version](https://img.shields.io/badge/version-v0.1.0-blue)
+![Version](https://img.shields.io/badge/version-v0.1.1-blue)
 ![Go](https://img.shields.io/badge/Go-1.26-00ADD8)
 ![Docker](https://img.shields.io/badge/Docker-Hub-2496ED)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -68,7 +68,8 @@ $env:DSH_MANAGER_PAIRING_CODE = "one-time-pairing-code"
 $env:DSH_MANAGER_ADMIN_USERNAME = "admin"
 $env:DSH_MANAGER_ADMIN_PASSWORD = "change-this-password"
 $env:DSH_MANAGER_ADMIN_TOKEN = "long-random-admin-token"
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
 
 也可以直接拉取 Docker Hub 镜像：
@@ -94,7 +95,7 @@ DOCKERHUB_USERNAME
 DOCKERHUB_TOKEN
 ```
 
-推送版本标签（例如 v0.1.0）后，GitHub Actions 会构建 linux/amd64 和 linux/arm64 镜像并推送到 Docker Hub。
+推送版本标签（例如 v0.1.1）后，GitHub Actions 会构建 linux/amd64 和 linux/arm64 镜像并推送到 Docker Hub。
 
 端口：
 
@@ -132,7 +133,7 @@ Agent 配对和心跳支持 HTTP 或 HTTPS；公网推荐 HTTPS：
 POST https://manager.example.com:8443/api/v1/agents/enroll
 Content-Type: application/json
 
-{"pairingCode":"...","name":"Office-PC","platform":"windows","launcherVersion":"0.2.0"}
+{"pairingCode":"...","name":"Office-PC","platform":"windows","launcherVersion":"0.2.1"}
 ```
 
 响应中的 `agentToken` 只返回一次。launcher 会使用 Windows DPAPI 保护后保存。

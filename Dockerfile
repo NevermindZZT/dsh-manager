@@ -6,9 +6,11 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/dsh-manager ./cmd/dsh-manager
 
 FROM alpine:3.22
-RUN adduser -D -u 10001 dsh
+RUN adduser -D -u 10001 dsh \
+    && mkdir -p /data \
+    && chown -R dsh:dsh /data
 USER dsh
 WORKDIR /data
 COPY --from=build /out/dsh-manager /usr/local/bin/dsh-manager
-EXPOSE 8080 8443
+EXPOSE 10090 10091
 ENTRYPOINT ["/usr/local/bin/dsh-manager"]

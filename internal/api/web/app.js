@@ -31,7 +31,29 @@
     $("tlsFingerprint").textContent = info.tlsFingerprint || "HTTP 模式无需 TLS 指纹";
   }
   async function refreshPairing() { try { const info = await api("/api/v1/admin/pairing/refresh", { method: "POST" }); $("pairingCode").textContent = info.pairingCode || ""; $("tlsFingerprint").textContent = info.tlsFingerprint || "HTTP 模式无需 TLS 指纹"; } catch (error) { $("error").textContent = error.message; } }
-  async function copyText(id) { try { await navigator.clipboard.writeText($(id).textContent); $("error").textContent = "已复制"; } catch (error) { $("error").textContent = "复制失败，请手动选择文本"; } }
+  async function copyText(id) {
+    const text = $(id).textContent || "";
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const area = document.createElement("textarea");
+        area.value = text;
+        area.setAttribute("readonly", "");
+        area.style.position = "fixed";
+        area.style.opacity = "0";
+        document.body.appendChild(area);
+        area.select();
+        area.setSelectionRange(0, area.value.length);
+        const copied = document.execCommand("copy");
+        document.body.removeChild(area);
+        if (!copied) throw new Error("copy command failed");
+      }
+      $("error").textContent = "已复制";
+    } catch (error) {
+      $("error").textContent = "复制失败，请手动选择文本";
+    }
+  }
   async function loadData() {
     try {
       const values = await Promise.all([api("/api/v1/agents"), api("/api/v1/instances"), loadPairing()]);

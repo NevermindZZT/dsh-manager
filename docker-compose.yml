@@ -1,16 +1,22 @@
 services:
   dsh-manager:
-    build: .
+    image: nevermindzzt/dsh-manager:latest
+    pull_policy: always
+    restart: unless-stopped
     ports:
-      - "8080:8080"
-      - "8443:8443"
+      - "10090:10090"
+      - "10091:10091"
     environment:
-      DSH_MANAGER_HTTP_ADDR: ":8080"
-      DSH_MANAGER_AGENT_HTTPS_ADDR: ":8443"
+      # 监听地址只能填写 host:port，不要带 http:// 或 https://
+      DSH_MANAGER_HTTP_ADDR: ":10090"
+      DSH_MANAGER_AGENT_HTTPS_ADDR: ":10091"
       DSH_MANAGER_DATA_DIR: /data
       DSH_MANAGER_PAIRING_CODE: ${DSH_MANAGER_PAIRING_CODE:?set pairing code}
       DSH_MANAGER_ADMIN_USERNAME: ${DSH_MANAGER_ADMIN_USERNAME:-admin}
       DSH_MANAGER_ADMIN_PASSWORD: ${DSH_MANAGER_ADMIN_PASSWORD:?set admin password}
       DSH_MANAGER_ADMIN_TOKEN: ${DSH_MANAGER_ADMIN_TOKEN:?set admin token}
     volumes:
-      - ./data:/data
+      - dsh-manager-data:/data
+
+volumes:
+  dsh-manager-data:
