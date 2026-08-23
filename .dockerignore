@@ -1,0 +1,7 @@
+.git
+.tools
+bin
+data
+test-data
+*.db
+*.log

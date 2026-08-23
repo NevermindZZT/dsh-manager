@@ -10,5 +10,5 @@ RUN adduser -D -u 10001 dsh
 USER dsh
 WORKDIR /data
 COPY --from=build /out/dsh-manager /usr/local/bin/dsh-manager
-EXPOSE 8080
+EXPOSE 8080 8443
 ENTRYPOINT ["/usr/local/bin/dsh-manager"]

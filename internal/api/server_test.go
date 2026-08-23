@@ -25,7 +25,10 @@ func TestEnrollHeartbeatAndAdminList(t *testing.T) {
 	defer ts.Close()
 
 	enrollBody := `{"pairingCode":"pair-123","name":"test-pc","platform":"windows","launcherVersion":"0.1.0"}`
-	response, err := http.Post(ts.URL+"/api/v1/agents/enroll", "application/json", bytes.NewBufferString(enrollBody))
+	enrollReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/agents/enroll", bytes.NewBufferString(enrollBody))
+	enrollReq.Header.Set("Content-Type", "application/json")
+	enrollReq.Header.Set("X-Forwarded-Proto", "https")
+	response, err := http.DefaultClient.Do(enrollReq)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,6 +49,7 @@ func TestEnrollHeartbeatAndAdminList(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+enrolled.AgentToken)
 	req.Header.Set("X-Agent-Id", enrolled.AgentID)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Forwarded-Proto", "https")
 	response, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -75,7 +79,10 @@ func TestEnrollHeartbeatAndAdminList(t *testing.T) {
 		t.Fatalf("unexpected instances: %+v", listed)
 	}
 
-	response, err = http.Post(ts.URL+"/api/v1/agents/enroll", "application/json", bytes.NewBufferString(enrollBody))
+	enrollReq, _ = http.NewRequest(http.MethodPost, ts.URL+"/api/v1/agents/enroll", bytes.NewBufferString(enrollBody))
+	enrollReq.Header.Set("Content-Type", "application/json")
+	enrollReq.Header.Set("X-Forwarded-Proto", "https")
+	response, err = http.DefaultClient.Do(enrollReq)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -22,6 +22,7 @@ type Agent struct {
 	LauncherVersion string     `json:"launcherVersion"`
 	LastSeenAt      *time.Time `json:"lastSeenAt,omitempty"`
 	Revoked         bool       `json:"revoked"`
+	Online          bool       `json:"online"`
 }
 
 type Instance struct {

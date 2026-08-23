@@ -1,0 +1,11 @@
+# Copy to config.yaml and edit values. Environment variables override this file.
+http_addr: "127.0.0.1:18080"
+agent_https_addr: "127.0.0.1:18443"
+data_dir: "./data"
+# tls_cert_file: "./data/server.crt"
+# tls_key_file: "./data/server.key"
+# database_path: "./data/dsh-manager.db"
+pairing_code: "replace-with-pairing-code"
+admin_username: "admin"
+admin_password: "replace-with-dashboard-password"
+admin_token: "replace-with-automation-token"

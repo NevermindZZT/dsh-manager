@@ -3,10 +3,14 @@ services:
     build: .
     ports:
       - "8080:8080"
+      - "8443:8443"
     environment:
       DSH_MANAGER_HTTP_ADDR: ":8080"
+      DSH_MANAGER_AGENT_HTTPS_ADDR: ":8443"
       DSH_MANAGER_DATA_DIR: /data
       DSH_MANAGER_PAIRING_CODE: ${DSH_MANAGER_PAIRING_CODE:?set pairing code}
+      DSH_MANAGER_ADMIN_USERNAME: ${DSH_MANAGER_ADMIN_USERNAME:-admin}
+      DSH_MANAGER_ADMIN_PASSWORD: ${DSH_MANAGER_ADMIN_PASSWORD:?set admin password}
       DSH_MANAGER_ADMIN_TOKEN: ${DSH_MANAGER_ADMIN_TOKEN:?set admin token}
     volumes:
       - ./data:/data

@@ -5,3 +5,10 @@
 *.db-wal
 .env
 /.tools/
+
+# Local configuration and generated runtime data
+/config.yaml
+/test-data/
+*.exe
+*.crt
+*.key
