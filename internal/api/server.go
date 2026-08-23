@@ -724,7 +724,17 @@ func injectBrowserCompatibility(headers map[string]string, data []byte) []byte {
 			contentEncoding = value
 		}
 	}
-	if !strings.Contains(strings.ToLower(contentType), "text/html") || contentEncoding != "" {
+	if contentEncoding != "" {
+		return data
+	}
+	contentTypeLower := strings.ToLower(contentType)
+	if strings.Contains(contentTypeLower, "javascript") || strings.Contains(contentTypeLower, "ecmascript") {
+		script := string(data)
+		script = strings.ReplaceAll(script, `connection.isLoopback ? "host" : "memory"`, `"host"`)
+		script = strings.ReplaceAll(script, `connection.isLoopback?"host":"memory"`, `"host"`)
+		return []byte(script)
+	}
+	if !strings.Contains(contentTypeLower, "text/html") {
 		return data
 	}
 	lower := strings.ToLower(string(data))
