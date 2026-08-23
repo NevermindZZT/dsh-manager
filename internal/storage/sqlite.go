@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,6 +21,10 @@ type Agent struct {
 	Name            string     `json:"name"`
 	Platform        string     `json:"platform"`
 	LauncherVersion string     `json:"launcherVersion"`
+	AgentType       string     `json:"agentType,omitempty"`
+	AgentVersion    string     `json:"agentVersion,omitempty"`
+	PluginVersion   string     `json:"pluginVersion,omitempty"`
+	Capabilities    []string   `json:"capabilities,omitempty"`
 	LastSeenAt      *time.Time `json:"lastSeenAt,omitempty"`
 	Revoked         bool       `json:"revoked"`
 	Online          bool       `json:"online"`
@@ -67,7 +72,11 @@ CREATE TABLE IF NOT EXISTS agents (
   token_hash TEXT NOT NULL,
   paired_at TEXT NOT NULL,
   last_seen_at TEXT,
-  revoked INTEGER NOT NULL DEFAULT 0
+  revoked INTEGER NOT NULL DEFAULT 0,
+  agent_type TEXT NOT NULL DEFAULT 'launcher',
+  agent_version TEXT NOT NULL DEFAULT '',
+  plugin_version TEXT NOT NULL DEFAULT '',
+  capabilities TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS instances (
   agent_id TEXT NOT NULL,
@@ -84,6 +93,44 @@ CREATE TABLE IF NOT EXISTS instances (
   PRIMARY KEY (agent_id, instance_id),
   FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
 );`)
+	if err != nil {
+		return err
+	}
+	for _, column := range []struct{ name, definition string }{
+		{"agent_type", "TEXT NOT NULL DEFAULT 'launcher'"},
+		{"agent_version", "TEXT NOT NULL DEFAULT ''"},
+		{"plugin_version", "TEXT NOT NULL DEFAULT ''"},
+		{"capabilities", "TEXT NOT NULL DEFAULT '[]'"},
+	} {
+		if err := db.ensureColumn("agents", column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (db *DB) ensureColumn(table, name, definition string) error {
+	rows, err := db.sql.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var column, kind string
+		var notNull, pk int
+		var defaultValue any
+		if err := rows.Scan(&cid, &column, &kind, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if column == name {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.sql.Exec("ALTER TABLE " + table + " ADD COLUMN " + name + " " + definition)
 	return err
 }
 
@@ -95,6 +142,36 @@ func HashToken(token string) string {
 func (db *DB) CreateAgent(id, name, platform, launcherVersion, token string) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := db.sql.Exec(`INSERT INTO agents(id,name,platform,launcher_version,token_hash,paired_at,last_seen_at) VALUES(?,?,?,?,?,?,?)`, id, name, platform, launcherVersion, HashToken(token), now, now)
+	return err
+}
+
+func (db *DB) CreateAgentWithMetadata(id, name, platform, launcherVersion, agentType, agentVersion, pluginVersion string, capabilities []string, token string) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if agentType == "" {
+		agentType = "launcher"
+	}
+	encoded, err := json.Marshal(capabilities)
+	if err != nil {
+		return err
+	}
+	_, err = db.sql.Exec(`INSERT INTO agents(id,name,platform,launcher_version,agent_type,agent_version,plugin_version,capabilities,token_hash,paired_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, id, name, platform, launcherVersion, agentType, agentVersion, pluginVersion, string(encoded), HashToken(token), now, now)
+	return err
+}
+
+func (db *DB) UpdateAgentMetadata(id, agentType, agentVersion, pluginVersion string, capabilities []string) error {
+	if agentType == "" {
+		agentType = "launcher"
+	}
+	encoded, err := json.Marshal(capabilities)
+	if err != nil {
+		return err
+	}
+	_, err = db.sql.Exec(`UPDATE agents SET agent_type=?,agent_version=?,plugin_version=?,capabilities=? WHERE id=?`, agentType, agentVersion, pluginVersion, string(encoded), id)
+	return err
+}
+
+func (db *DB) UpdateAgentName(id, name string) error {
+	_, err := db.sql.Exec(`UPDATE agents SET name=? WHERE id=?`, name, id)
 	return err
 }
 
@@ -136,7 +213,7 @@ ON CONFLICT(agent_id,instance_id) DO UPDATE SET display_name=excluded.display_na
 }
 
 func (db *DB) ListAgents() ([]Agent, error) {
-	rows, err := db.sql.Query(`SELECT id,name,platform,launcher_version,last_seen_at,revoked FROM agents ORDER BY name,id`)
+	rows, err := db.sql.Query(`SELECT id,name,platform,launcher_version,agent_type,agent_version,plugin_version,capabilities,last_seen_at,revoked FROM agents ORDER BY name,id`)
 	if err != nil {
 		return nil, err
 	}
@@ -146,10 +223,12 @@ func (db *DB) ListAgents() ([]Agent, error) {
 		var a Agent
 		var seen sql.NullString
 		var revoked int
-		if err := rows.Scan(&a.ID, &a.Name, &a.Platform, &a.LauncherVersion, &seen, &revoked); err != nil {
+		var encodedCapabilities string
+		if err := rows.Scan(&a.ID, &a.Name, &a.Platform, &a.LauncherVersion, &a.AgentType, &a.AgentVersion, &a.PluginVersion, &encodedCapabilities, &seen, &revoked); err != nil {
 			return nil, err
 		}
 		a.Revoked = revoked != 0
+		_ = json.Unmarshal([]byte(encodedCapabilities), &a.Capabilities)
 		a.LastSeenAt = parseNullableTime(seen)
 		result = append(result, a)
 	}

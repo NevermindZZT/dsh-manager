@@ -112,6 +112,31 @@ offline
 
 `generation` 用于区分重启前后的实例生命周期，`eventSeq` 用于后续事件游标和断线恢复。
 
+## Optional agent metadata (backward-compatible)
+
+Protocol version remains `1`. Existing launcher clients may omit all fields below and retain their previous behavior.
+
+Enrollment and register/heartbeat messages may include:
+
+```json
+{
+  "agentType": "dsh-plugin",
+  "agentVersion": "v0.1.0",
+  "pluginVersion": "0.1.0",
+  "capabilities": ["proxy.http", "proxy.websocket", "settings.host", "plugin.config"]
+}
+```
+
+Supported capability names currently include:
+
+- `command` — lifecycle commands;
+- `proxy.http` — HTTP proxy;
+- `proxy.websocket` — WebSocket proxy;
+- `settings.host` — host-backed settings persistence;
+- `plugin.config` — plugin-owned settings.
+
+Unknown capability names are ignored. If an existing agent omits capabilities, manager treats it as a legacy launcher with the original HTTP/WebSocket behavior. A dsh-plugin must explicitly advertise the proxy capabilities it supports.
+
 ## 兼容性约束
 
 - 未知消息类型必须记录并忽略，不得导致 Agent 退出；

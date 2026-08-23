@@ -115,7 +115,30 @@ docker compose logs -f dsh-manager
 docker compose down
 ```
 
-## 8. 常见连接失败
+## 8. dsh plugin Agent 测试
+
+在运行 dsh 的服务器安装插件依赖并配置：
+
+```powershell
+cd D:\code\dsh-launcher\dsh-manager-plugin
+npm install
+$env:DSH_MANAGER_URL = "https://127.0.0.1:18443"
+$env:DSH_MANAGER_PAIRING_CODE = "pair-plugin-001"
+$env:DSH_MANAGER_NAME = "plugin-dsh"
+$env:DSH_MANAGER_TLS_FINGERPRINT = "复制 manager 指纹"
+```
+
+将插件加载到 dsh profile 后，manager 应看到 agentType 为 `dsh-plugin`，并显示一个 type 为 `plugin` 的实例。验证：
+
+1. Dashboard 点击“打开 dsh”；
+2. 检查普通资源、settings RPC 和插件配置页面；
+3. 创建 dsh session 并验证 WebSocket 实时交互；
+4. 停止 dsh，确认 plugin Agent 自动断开；
+5. 重新启动 dsh，确认 Agent 自动重连。
+
+旧 launcher Agent 的生命周期、HTTP tunnel 和 WebSocket tunnel 测试必须继续通过。
+
+## 9. 常见连接失败
 
 ### Agent 通道连接失败
 

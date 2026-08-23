@@ -1,9 +1,11 @@
 # dsh-manager
 
-![Version](https://img.shields.io/badge/version-v0.1.2-blue)
+![Version](https://img.shields.io/badge/version-v0.2.0-blue)
 ![Go](https://img.shields.io/badge/Go-1.26-00ADD8)
 ![Docker](https://img.shields.io/badge/Docker-Hub-2496ED)
 ![License](https://img.shields.io/badge/license-MIT-green)
+
+![panel](./docs/panel.png)
 
 服务器端 dsh 实例管理服务，使用 Go 编写，可直接运行或通过 Docker 部署。Docker 镜像发布到 `nevermindzzt/dsh-manager`。
 
@@ -95,7 +97,7 @@ DOCKERHUB_USERNAME
 DOCKERHUB_TOKEN
 ```
 
-推送版本标签（例如 v0.1.2）后，GitHub Actions 会构建 linux/amd64 和 linux/arm64 镜像并推送到 Docker Hub。
+推送版本标签（例如 v0.2.0）后，GitHub Actions 会构建 linux/amd64 和 linux/arm64 镜像并推送到 Docker Hub。
 
 端口：
 
@@ -133,7 +135,7 @@ Agent 配对和心跳支持 HTTP 或 HTTPS；公网推荐 HTTPS：
 POST https://manager.example.com:8443/api/v1/agents/enroll
 Content-Type: application/json
 
-{"pairingCode":"...","name":"Office-PC","platform":"windows","launcherVersion":"0.2.1"}
+{"pairingCode":"...","name":"Office-PC","platform":"windows","launcherVersion":"0.2.2"}
 ```
 
 响应中的 `agentToken` 只返回一次。launcher 会使用 Windows DPAPI 保护后保存。
@@ -210,6 +212,28 @@ update
 ```
 
 浏览器地址栏保持该路径，不再直接使用根路径。dsh 发出的绝对路径请求仍通过实例 Cookie 路由到同一个目标实例。代理覆盖 GET、POST、PUT、PATCH、DELETE、OPTIONS 等 HTTP 方法，以及 HTML、静态资源、REST API、上传下载和 dsh 实时 WebSocket 会话。WebSocket 使用文本/二进制帧转发，并在浏览器、manager、Agent、目标 dsh 之间保持独立的关闭和超时语义。
+
+## dsh plugin Agent
+
+除 dsh-launcher 外，manager 还支持在 dsh 进程内运行的直连插件：
+
+```text
+浏览器 -> dsh-manager -> dsh-manager-plugin -> 当前 dsh
+```
+
+插件使用同一套 Agent Protocol v1，只增加可选的 agentType、agentVersion、pluginVersion 和 capabilities 字段，不改变旧 launcher 的连接方式。
+
+推荐能力：
+
+- `proxy.http`
+- `proxy.websocket`
+- `settings.host`
+- `plugin.config`
+
+插件仓库和安装说明：
+https://github.com/NevermindZZT/dsh-manager-plugin
+
+插件不能执行 start/stop/restart/update 等 launcher 生命周期命令；dsh 退出后插件连接也会断开。launcher Agent 与 plugin Agent 可以同时连接到同一个 manager。
 
 ## 安全边界
 

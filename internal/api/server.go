@@ -48,15 +48,25 @@ type webTarget struct {
 }
 
 type agentSession struct {
-	conn    *websocket.Conn
-	writeMu sync.Mutex
+	conn            *websocket.Conn
+	writeMu         sync.Mutex
+	metadataMu      sync.RWMutex
+	agentType       string
+	agentVersion    string
+	pluginVersion   string
+	capabilities    []string
+	hasCapabilities bool
 }
 
 type enrollRequest struct {
-	PairingCode     string `json:"pairingCode"`
-	Name            string `json:"name"`
-	Platform        string `json:"platform"`
-	LauncherVersion string `json:"launcherVersion"`
+	PairingCode     string   `json:"pairingCode"`
+	Name            string   `json:"name"`
+	Platform        string   `json:"platform"`
+	LauncherVersion string   `json:"launcherVersion"`
+	AgentType       string   `json:"agentType,omitempty"`
+	AgentVersion    string   `json:"agentVersion,omitempty"`
+	PluginVersion   string   `json:"pluginVersion,omitempty"`
+	Capabilities    []string `json:"capabilities,omitempty"`
 }
 type enrollResponse struct {
 	AgentID         string `json:"agentId"`
@@ -234,7 +244,7 @@ func (s *Server) enroll(w http.ResponseWriter, r *http.Request) {
 	s.pairingMu.Unlock()
 	agentID := "agent-" + randomHex(12)
 	token := "agt_" + randomHex(32)
-	if err := s.db.CreateAgent(agentID, strings.TrimSpace(req.Name), strings.TrimSpace(req.Platform), strings.TrimSpace(req.LauncherVersion), token); err != nil {
+	if err := s.db.CreateAgentWithMetadata(agentID, strings.TrimSpace(req.Name), strings.TrimSpace(req.Platform), strings.TrimSpace(req.LauncherVersion), normalizeAgentType(req.AgentType), strings.TrimSpace(req.AgentVersion), strings.TrimSpace(req.PluginVersion), normalizeCapabilities(req.Capabilities), token); err != nil {
 		writeError(w, http.StatusInternalServerError, "create agent failed")
 		return
 	}
@@ -273,16 +283,21 @@ func (s *Server) agentHeartbeat(w http.ResponseWriter, r *http.Request) {
 }
 
 type agentMessage struct {
-	Type       string             `json:"type"`
-	Instances  []storage.Instance `json:"instances,omitempty"`
-	RequestID  string             `json:"requestId,omitempty"`
-	InstanceID string             `json:"instanceId,omitempty"`
-	OK         *bool              `json:"ok,omitempty"`
-	Error      string             `json:"error,omitempty"`
-	Status     int                `json:"status,omitempty"`
-	Headers    map[string]string  `json:"headers,omitempty"`
-	Body       string             `json:"body,omitempty"`
-	FrameType  string             `json:"frameType,omitempty"`
+	Type          string             `json:"type"`
+	Name          string             `json:"name,omitempty"`
+	AgentType     string             `json:"agentType,omitempty"`
+	AgentVersion  string             `json:"agentVersion,omitempty"`
+	PluginVersion string             `json:"pluginVersion,omitempty"`
+	Capabilities  []string           `json:"capabilities,omitempty"`
+	Instances     []storage.Instance `json:"instances,omitempty"`
+	RequestID     string             `json:"requestId,omitempty"`
+	InstanceID    string             `json:"instanceId,omitempty"`
+	OK            *bool              `json:"ok,omitempty"`
+	Error         string             `json:"error,omitempty"`
+	Status        int                `json:"status,omitempty"`
+	Headers       map[string]string  `json:"headers,omitempty"`
+	Body          string             `json:"body,omitempty"`
+	FrameType     string             `json:"frameType,omitempty"`
 }
 
 type commandRequest struct {
@@ -315,7 +330,7 @@ func (s *Server) agentConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	conn.SetReadLimit(32 << 20)
-	session := &agentSession{conn: conn}
+	session := &agentSession{conn: conn, agentType: "launcher"}
 	s.sessionsMu.Lock()
 	previous := s.sessions[agentID]
 	s.sessions[agentID] = session
@@ -360,6 +375,12 @@ func requireSecureTransport(w http.ResponseWriter, r *http.Request) bool {
 func (s *Server) handleAgentMessage(agentID string, message agentMessage) error {
 	switch message.Type {
 	case "register", "heartbeat":
+		s.logger.Info("agent state received", "agentId", agentID, "type", message.Type, "name", message.Name, "agentType", message.AgentType, "instances", len(message.Instances), "capabilities", message.Capabilities)
+		if message.AgentType != "" || len(message.Capabilities) > 0 || message.AgentVersion != "" || message.PluginVersion != "" {
+			if err := s.updateSessionMetadata(agentID, message); err != nil {
+				return err
+			}
+		}
 		return s.db.UpsertHeartbeat(agentID, message.Instances)
 	case "command_result":
 		s.logger.Info("agent command result", "agentId", agentID, "requestId", message.RequestID, "instanceId", message.InstanceID, "ok", message.OK, "error", message.Error)
@@ -386,6 +407,65 @@ func (s *Server) handleAgentMessage(agentID string, message agentMessage) error 
 	}
 }
 
+func normalizeAgentType(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "dsh-plugin" {
+		return value
+	}
+	return "launcher"
+}
+
+func normalizeCapabilities(values []string) []string {
+	seen := make(map[string]bool)
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value != "" && !seen[value] {
+			seen[value] = true
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func (s *Server) updateSessionMetadata(agentID string, message agentMessage) error {
+	s.sessionsMu.RLock()
+	session := s.sessions[agentID]
+	s.sessionsMu.RUnlock()
+	if session == nil {
+		return fmt.Errorf("agent session is unavailable")
+	}
+	agentType := normalizeAgentType(message.AgentType)
+	caps := normalizeCapabilities(message.Capabilities)
+	session.metadataMu.Lock()
+	session.agentType = agentType
+	session.agentVersion = strings.TrimSpace(message.AgentVersion)
+	session.pluginVersion = strings.TrimSpace(message.PluginVersion)
+	session.capabilities = caps
+	session.hasCapabilities = len(message.Capabilities) > 0
+	session.metadataMu.Unlock()
+	if strings.TrimSpace(message.Name) != "" {
+		if err := s.db.UpdateAgentName(agentID, strings.TrimSpace(message.Name)); err != nil {
+			return err
+		}
+	}
+	return s.db.UpdateAgentMetadata(agentID, agentType, message.AgentVersion, message.PluginVersion, caps)
+}
+
+func supportsCapability(session *agentSession, capability string) bool {
+	session.metadataMu.RLock()
+	defer session.metadataMu.RUnlock()
+	if !session.hasCapabilities {
+		return session.agentType != "dsh-plugin"
+	}
+	for _, value := range session.capabilities {
+		if value == capability {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) adminCommand(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeAdmin(w, r) {
 		return
@@ -404,6 +484,10 @@ func (s *Server) adminCommand(w http.ResponseWriter, r *http.Request) {
 	s.sessionsMu.RUnlock()
 	if session == nil {
 		writeError(w, http.StatusConflict, "agent is offline")
+		return
+	}
+	if !supportsCapability(session, "command") {
+		writeError(w, http.StatusNotImplemented, "agent does not support lifecycle commands")
 		return
 	}
 	requestID := "cmd-" + randomHex(12)
@@ -562,6 +646,10 @@ func (s *Server) proxyWebSocket(w http.ResponseWriter, r *http.Request) {
 		s.dashboard(w, r)
 		return
 	}
+	if !supportsCapability(session, "proxy.websocket") {
+		http.Error(w, "agent does not support WebSocket proxy", http.StatusNotImplemented)
+		return
+	}
 	browser, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		return
@@ -660,6 +748,10 @@ func (s *Server) proxyHTTPForTarget(w http.ResponseWriter, r *http.Request, targ
 	if session == nil {
 		clearTargetCookie(w)
 		s.dashboard(w, r)
+		return
+	}
+	if !supportsCapability(session, "proxy.http") {
+		http.Error(w, "agent does not support HTTP proxy", http.StatusNotImplemented)
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, 16<<20))
