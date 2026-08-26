@@ -21,6 +21,7 @@ import (
 
 	"github.com/NevermindZZT/dsh-manager/internal/config"
 	"github.com/NevermindZZT/dsh-manager/internal/storage"
+	"github.com/NevermindZZT/dsh-manager/internal/version"
 )
 
 type Server struct {
@@ -94,6 +95,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/logout", s.authLogout)
 	mux.HandleFunc("GET /api/v1/admin/pairing", s.adminPairing)
 	mux.HandleFunc("POST /api/v1/admin/pairing/refresh", s.refreshPairing)
+	mux.HandleFunc("DELETE /api/v1/admin/agents/{agentId}", s.revokeAgent)
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("POST /api/v1/agents/enroll", s.enroll)
 	mux.HandleFunc("POST /api/v1/agent/heartbeat", s.agentHeartbeat)
@@ -157,7 +159,7 @@ func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
 	s.authSessions[sessionID] = expires
 	s.sessionsAuthMu.Unlock()
 	http.SetCookie(w, &http.Cookie{Name: "dsh-session", Value: sessionID, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: r.TLS != nil, MaxAge: 86400})
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "username": s.cfg.AdminUsername, "expiresAt": expires})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "username": s.cfg.AdminUsername, "version": version.Version, "expiresAt": expires})
 }
 func (s *Server) authLogout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie("dsh-session"); err == nil {
@@ -171,7 +173,7 @@ func (s *Server) authLogout(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) authMe(w http.ResponseWriter, r *http.Request) {
 	if s.isAuthenticated(r) {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "username": s.cfg.AdminUsername})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "username": s.cfg.AdminUsername, "version": version.Version})
 		return
 	}
 	writeError(w, http.StatusUnauthorized, "未登录")
@@ -218,7 +220,7 @@ func (s *Server) refreshPairing(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "service": "dsh-manager", "time": time.Now().UTC()})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "service": "dsh-manager", "version": version.Version, "time": time.Now().UTC()})
 }
 
 func (s *Server) enroll(w http.ResponseWriter, r *http.Request) {
@@ -341,10 +343,16 @@ func (s *Server) agentConnect(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		conn.CloseNow()
 		s.sessionsMu.Lock()
-		if s.sessions[agentID] == session {
+		current := s.sessions[agentID] == session
+		if current {
 			delete(s.sessions, agentID)
 		}
 		s.sessionsMu.Unlock()
+		if current {
+			if err := s.db.MarkAgentOffline(agentID); err != nil {
+				s.logger.Warn("mark agent offline failed", "agentId", agentID, "error", err)
+			}
+		}
 	}()
 	s.logger.Info("agent connected", "agentId", agentID)
 	_ = s.writeAgentMessage(r.Context(), session, agentMessage{Type: "hello", RequestID: "manager"})
@@ -851,6 +859,30 @@ func isHopHeader(name string) bool {
 	return false
 }
 
+func (s *Server) revokeAgent(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeAdmin(w, r) {
+		return
+	}
+	agentID := r.PathValue("agentId")
+	if strings.TrimSpace(agentID) == "" {
+		writeError(w, http.StatusBadRequest, "agentId is required")
+		return
+	}
+	if err := s.db.RevokeAgent(agentID); err != nil {
+		writeError(w, http.StatusInternalServerError, "revoke agent failed")
+		return
+	}
+	s.sessionsMu.Lock()
+	session := s.sessions[agentID]
+	delete(s.sessions, agentID)
+	s.sessionsMu.Unlock()
+	if session != nil {
+		_ = session.conn.Close(websocket.StatusPolicyViolation, "agent pairing revoked")
+	}
+	s.logger.Info("agent pairing revoked", "agentId", agentID)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "agentId": agentID})
+}
+
 func (s *Server) adminAgents(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeAdmin(w, r) {
 		return
@@ -876,6 +908,17 @@ func (s *Server) adminInstances(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "list instances failed")
 		return
 	}
+	s.sessionsMu.RLock()
+	for i := range result {
+		if s.sessions[result[i].AgentID] == nil {
+			result[i].State = "offline"
+			result[i].URLAvailable = false
+			if result[i].Error == "" {
+				result[i].Error = "agent offline"
+			}
+		}
+	}
+	s.sessionsMu.RUnlock()
 	writeJSON(w, 200, map[string]any{"instances": result})
 }
 

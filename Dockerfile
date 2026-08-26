@@ -11,6 +11,7 @@ RUN adduser -D -u 10001 dsh \
     && chown -R dsh:dsh /data
 USER dsh
 WORKDIR /data
+COPY VERSION /usr/local/share/dsh-manager/VERSION
 COPY --from=build /out/dsh-manager /usr/local/bin/dsh-manager
 EXPOSE 10090 10091
 ENTRYPOINT ["/usr/local/bin/dsh-manager"]

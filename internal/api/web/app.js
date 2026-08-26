@@ -10,7 +10,7 @@
     if (!response.ok) throw new Error(text || ("HTTP " + response.status));
     return text ? JSON.parse(text) : {};
   }
-  function showApp(username) { $("loginView").classList.add("hidden"); $("appView").classList.remove("hidden"); $("welcome").textContent = "已登录：" + username; }
+  function showApp(username, managerVersion) { $("loginView").classList.add("hidden"); $("appView").classList.remove("hidden"); $("welcome").textContent = "已登录：" + username; if (managerVersion) $("version").textContent = "v" + managerVersion; }
   function showLogin() { $("appView").classList.add("hidden"); $("loginView").classList.remove("hidden"); }
   function esc(value) { return String(value || "").replace(/[&<>]/g, function (c) { return {"&":"&amp;","<":"&lt;",">":"&gt;"}[c]; }); }
   function escAttr(value) { return String(value || "").replace(/[^a-zA-Z0-9_.:-]/g, "_"); }
@@ -68,8 +68,8 @@
       $("agentCount").textContent = agents.filter(function (x) { return x.online; }).length;
       $("instanceCount").textContent = instances.length;
       $("runningCount").textContent = instances.filter(function (x) { return x.state === "running"; }).length;
-      $("agents").innerHTML = agents.length ? agents.map(function (x) { return '<div class="instance"><div class="instance-head"><h3>' + esc(x.name) + '</h3><span class="pill ' + (x.online ? 'online' : 'offline') + '">' + (x.online ? '在线' : '离线') + '</span></div><code>' + esc(x.id) + '</code><span class="muted">' + esc(x.platform) + ' · ' + esc(x.agentType || 'launcher') + ' · ' + esc(x.launcherVersion || x.pluginVersion || '') + '</span></div>'; }).join("") : '<span class="muted">暂无 Agent</span>';
-      $("instances").innerHTML = instances.length ? instances.map(function (x) { return '<div class="instance"><div class="instance-head"><h3>' + esc(x.displayName) + '</h3><span class="pill ' + escAttr(x.state) + '">' + esc(x.state) + '</span></div><code>' + esc(x.agentId + '/' + x.instanceId) + '</code><span class="muted">' + (x.urlAvailable ? '服务地址可用' : '服务未就绪') + '</span><div class="actions"><button data-action="start" data-agent="' + escAttr(x.agentId) + '" data-instance="' + escAttr(x.instanceId) + '">启动</button><button class="danger" data-action="stop" data-agent="' + escAttr(x.agentId) + '" data-instance="' + escAttr(x.instanceId) + '">停止</button><button data-action="restart" data-agent="' + escAttr(x.agentId) + '" data-instance="' + escAttr(x.instanceId) + '">重启</button><button class="secondary" data-action="open" data-agent="' + escAttr(x.agentId) + '" data-instance="' + escAttr(x.instanceId) + '">打开 dsh</button></div></div>'; }).join("") : '<span class="muted">暂无实例</span>';
+      $("agents").innerHTML = agents.length ? agents.map(function (x) { return '<div class="instance"><div class="instance-head"><h3>' + esc(x.name) + '</h3><span class="pill ' + (x.online ? 'online' : 'offline') + '">' + (x.online ? '在线' : '离线') + '</span></div><code>' + esc(x.id) + '</code><span class="muted">' + esc(x.platform) + ' · ' + esc(x.agentType || 'launcher') + ' · ' + esc(x.launcherVersion || x.pluginVersion || '') + '</span><div class=actions><button class=danger data-action=revoke data-agent="' + escAttr(x.id) + '">取消配对</button></div></div>'; }).join("") : '<span class="muted">暂无 Agent</span>';
+      $("instances").innerHTML = instances.length ? instances.map(function (x) { return '<div class="instance"><div class="instance-head"><h3>' + esc(x.displayName) + '</h3><span class="pill ' + escAttr(x.state) + '">' + esc(x.state) + '</span></div><div class=muted>电脑：' + esc(x.agentName || x.agentId) + '</div><code>' + esc(x.agentId + '/' + x.instanceId) + '</code><span class="muted">' + (x.urlAvailable ? '服务地址可用' : '服务未就绪') + '</span><div class="actions"><button data-action="start" data-agent="' + escAttr(x.agentId) + '" data-instance="' + escAttr(x.instanceId) + '">启动</button><button class="danger" data-action="stop" data-agent="' + escAttr(x.agentId) + '" data-instance="' + escAttr(x.instanceId) + '">停止</button><button data-action="restart" data-agent="' + escAttr(x.agentId) + '" data-instance="' + escAttr(x.instanceId) + '">重启</button><button class="secondary" data-action="open" data-agent="' + escAttr(x.agentId) + '" data-instance="' + escAttr(x.instanceId) + '">打开 dsh</button></div></div>'; }).join("") : '<span class="muted">暂无实例</span>';
       $("error").textContent = "";
     } catch (error) { if (error.message.indexOf("authorization") >= 0) showLogin(); else $("error").textContent = error.message; }
   }
@@ -80,6 +80,14 @@
   async function openDsh(agent, instance) {
     try { const result = await api("/api/v1/instances/" + encodeURIComponent(agent) + "/" + encodeURIComponent(instance) + "/open", { method: "POST" }); window.location.href = result.url || "/"; }
     catch (error) { $("error").textContent = error.message; }
+  }
+  async function revokeAgent(agent) {
+    const name = $("agents").querySelector("[data-agent=\"" + agent + "\"]")?.closest(".instance")?.querySelector("h3")?.textContent || agent;
+    if (!window.confirm("确定取消电脑「" + name + "」的配对吗？其关联 dsh 实例也会被移除。")) return;
+    try {
+      await api("/api/v1/admin/agents/" + encodeURIComponent(agent), { method: "DELETE" });
+      await loadData();
+    } catch (error) { $("error").textContent = error.message; }
   }
   $("loginForm").addEventListener("submit", login);
   $("refreshButton").addEventListener("click", loadData);
@@ -96,5 +104,6 @@
     setFingerprint(node.dataset.value || "");
   });
   $("instances").addEventListener("click", function (event) { const button = event.target.closest("button[data-action]"); if (!button) return; const action = button.dataset.action; if (action === "open") openDsh(button.dataset.agent, button.dataset.instance); else command(action, button.dataset.agent, button.dataset.instance); });
-  api("/api/v1/auth/me").then(function (result) { showApp(result.username); return loadData(); }).catch(showLogin);
+  $("agents").addEventListener("click", function (event) { const button = event.target.closest("button[data-action=revoke]"); if (button) revokeAgent(button.dataset.agent); });
+  api("/api/v1/auth/me").then(function (result) { showApp(result.username, result.version); return loadData(); }).catch(showLogin);
 })();

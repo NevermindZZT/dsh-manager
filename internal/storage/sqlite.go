@@ -32,6 +32,7 @@ type Agent struct {
 
 type Instance struct {
 	AgentID      string     `json:"agentId"`
+	AgentName    string     `json:"agentName,omitempty"`
 	InstanceID   string     `json:"instanceId"`
 	DisplayName  string     `json:"displayName"`
 	Type         string     `json:"type"`
@@ -175,6 +176,27 @@ func (db *DB) UpdateAgentName(id, name string) error {
 	return err
 }
 
+func (db *DB) MarkAgentOffline(id string) error {
+	_, err := db.sql.Exec(`UPDATE agents SET last_seen_at=last_seen_at WHERE id=?;
+UPDATE instances SET state='offline', url_available=0, error='agent offline' WHERE agent_id=?`, id, id)
+	return err
+}
+
+func (db *DB) RevokeAgent(id string) error {
+	tx, err := db.sql.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`UPDATE agents SET revoked=1 WHERE id=?`, id); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`DELETE FROM instances WHERE agent_id=?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (db *DB) AuthenticateAgent(id, token string) (bool, error) {
 	var stored string
 	var revoked int
@@ -213,7 +235,7 @@ ON CONFLICT(agent_id,instance_id) DO UPDATE SET display_name=excluded.display_na
 }
 
 func (db *DB) ListAgents() ([]Agent, error) {
-	rows, err := db.sql.Query(`SELECT id,name,platform,launcher_version,agent_type,agent_version,plugin_version,capabilities,last_seen_at,revoked FROM agents ORDER BY name,id`)
+	rows, err := db.sql.Query(`SELECT id,name,platform,launcher_version,agent_type,agent_version,plugin_version,capabilities,last_seen_at,revoked FROM agents WHERE revoked=0 ORDER BY name,id`)
 	if err != nil {
 		return nil, err
 	}
@@ -236,7 +258,7 @@ func (db *DB) ListAgents() ([]Agent, error) {
 }
 
 func (db *DB) ListInstances() ([]Instance, error) {
-	rows, err := db.sql.Query(`SELECT agent_id,instance_id,display_name,type,state,url_available,version,generation,event_seq,error,last_seen_at FROM instances ORDER BY agent_id,instance_id`)
+	rows, err := db.sql.Query(`SELECT i.agent_id,a.name,i.instance_id,i.display_name,i.type,i.state,i.url_available,i.version,i.generation,i.event_seq,i.error,i.last_seen_at FROM instances i LEFT JOIN agents a ON a.id=i.agent_id ORDER BY a.name,i.agent_id,i.instance_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -246,7 +268,7 @@ func (db *DB) ListInstances() ([]Instance, error) {
 		var i Instance
 		var available int
 		var seen sql.NullString
-		if err := rows.Scan(&i.AgentID, &i.InstanceID, &i.DisplayName, &i.Type, &i.State, &available, &i.Version, &i.Generation, &i.EventSeq, &i.Error, &seen); err != nil {
+		if err := rows.Scan(&i.AgentID, &i.AgentName, &i.InstanceID, &i.DisplayName, &i.Type, &i.State, &available, &i.Version, &i.Generation, &i.EventSeq, &i.Error, &seen); err != nil {
 			return nil, err
 		}
 		i.URLAvailable = available != 0
