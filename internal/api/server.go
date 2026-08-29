@@ -299,6 +299,7 @@ type agentMessage struct {
 	Error         string             `json:"error,omitempty"`
 	Status        int                `json:"status,omitempty"`
 	Headers       map[string]string  `json:"headers,omitempty"`
+	SetCookies    []string           `json:"setCookies,omitempty"`
 	Body          string             `json:"body,omitempty"`
 	FrameType     string             `json:"frameType,omitempty"`
 }
@@ -395,7 +396,7 @@ func (s *Server) handleAgentMessage(agentID string, message agentMessage) error 
 		s.logger.Info("agent command result", "agentId", agentID, "requestId", message.RequestID, "instanceId", message.InstanceID, "ok", message.OK, "error", message.Error)
 		return nil
 	case "proxy_response":
-		response := proxyResponse{RequestID: message.RequestID, Status: message.Status, Headers: message.Headers, Body: message.Body, Error: message.Error}
+		response := proxyResponse{RequestID: message.RequestID, Status: message.Status, Headers: message.Headers, SetCookies: message.SetCookies, Body: message.Body, Error: message.Error}
 		s.pendingMu.Lock()
 		ch := s.pending[message.RequestID]
 		s.pendingMu.Unlock()
@@ -553,11 +554,12 @@ func writeAgentBytes(ctx context.Context, session *agentSession, data []byte) er
 }
 
 type proxyResponse struct {
-	RequestID string            `json:"requestId"`
-	Status    int               `json:"status"`
-	Headers   map[string]string `json:"headers,omitempty"`
-	Body      string            `json:"body,omitempty"`
-	Error     string            `json:"error,omitempty"`
+	RequestID  string            `json:"requestId"`
+	Status     int               `json:"status"`
+	Headers    map[string]string `json:"headers,omitempty"`
+	SetCookies []string          `json:"setCookies,omitempty"`
+	Body       string            `json:"body,omitempty"`
+	Error      string            `json:"error,omitempty"`
 }
 
 type proxyRequest struct {
@@ -822,6 +824,9 @@ func (s *Server) proxyHTTPForTarget(w http.ResponseWriter, r *http.Request, targ
 		if !isHopHeader(k) {
 			w.Header().Set(k, v)
 		}
+	}
+	for _, cookie := range response.SetCookies {
+		w.Header().Add("Set-Cookie", cookie)
 	}
 	status := response.Status
 	if status == 0 {
