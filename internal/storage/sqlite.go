@@ -182,13 +182,13 @@ UPDATE instances SET state='offline', url_available=0, error='agent offline' WHE
 	return err
 }
 
-func (db *DB) RevokeAgent(id string) error {
+func (db *DB) DeleteAgent(id string) error {
 	tx, err := db.sql.BeginTx(context.Background(), nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err = tx.Exec(`UPDATE agents SET revoked=1 WHERE id=?`, id); err != nil {
+	if _, err = tx.Exec(`DELETE FROM agents WHERE id=?`, id); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(`DELETE FROM instances WHERE agent_id=?`, id); err != nil {

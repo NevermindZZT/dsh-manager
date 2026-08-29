@@ -817,9 +817,11 @@ func (s *Server) proxyHTTPForTarget(w http.ResponseWriter, r *http.Request, targ
 		return
 	}
 	if response.Error != "" {
+		s.logger.Warn("proxy response error", "agentId", agentID, "instanceId", instanceID, "requestId", requestID, "path", r.URL.RequestURI(), "error", response.Error)
 		http.Error(w, response.Error, 502)
 		return
 	}
+	s.logger.Info("proxy response received", "agentId", agentID, "instanceId", instanceID, "requestId", requestID, "path", r.URL.RequestURI(), "status", response.Status, "bytes", len(response.Body), "cookies", len(response.SetCookies))
 	for k, v := range response.Headers {
 		if !isHopHeader(k) {
 			w.Header().Set(k, v)
@@ -896,8 +898,8 @@ func (s *Server) revokeAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "agentId is required")
 		return
 	}
-	if err := s.db.RevokeAgent(agentID); err != nil {
-		writeError(w, http.StatusInternalServerError, "revoke agent failed")
+	if err := s.db.DeleteAgent(agentID); err != nil {
+		writeError(w, http.StatusInternalServerError, "delete agent failed")
 		return
 	}
 	s.sessionsMu.Lock()
@@ -905,9 +907,9 @@ func (s *Server) revokeAgent(w http.ResponseWriter, r *http.Request) {
 	delete(s.sessions, agentID)
 	s.sessionsMu.Unlock()
 	if session != nil {
-		_ = session.conn.Close(websocket.StatusPolicyViolation, "agent pairing revoked")
+		go func() { _ = session.conn.Close(websocket.StatusPolicyViolation, "agent pairing deleted") }()
 	}
-	s.logger.Info("agent pairing revoked", "agentId", agentID)
+	s.logger.Info("agent pairing deleted", "agentId", agentID)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "agentId": agentID})
 }
 
