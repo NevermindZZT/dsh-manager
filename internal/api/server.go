@@ -49,6 +49,7 @@ type webTarget struct {
 }
 
 type agentSession struct {
+	agentID         string
 	conn            *websocket.Conn
 	writeMu         sync.Mutex
 	metadataMu      sync.RWMutex
@@ -332,7 +333,7 @@ func (s *Server) agentConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	conn.SetReadLimit(32 << 20)
-	session := &agentSession{conn: conn, agentType: "launcher"}
+	session := &agentSession{agentID: agentID, conn: conn, agentType: "launcher"}
 	s.sessionsMu.Lock()
 	previous := s.sessions[agentID]
 	s.sessions[agentID] = session
@@ -525,6 +526,27 @@ func (s *Server) writeAgentJSON(ctx context.Context, session *agentSession, valu
 	if err != nil {
 		return err
 	}
+	if err := writeAgentBytes(ctx, session, data); err == nil {
+		return nil
+	} else {
+		// The agent may have reconnected between the session lookup and this
+		// write. Retry once against the current connection instead of returning
+		// a transient "proxy send failed" to the browser.
+		s.sessionsMu.RLock()
+		current := s.sessions[session.agentID]
+		s.sessionsMu.RUnlock()
+		if current != nil && current != session {
+			if retryErr := writeAgentBytes(ctx, current, data); retryErr == nil {
+				return nil
+			} else {
+				return fmt.Errorf("agent websocket write: %w; retry: %v", err, retryErr)
+			}
+		}
+		return fmt.Errorf("agent websocket write: %w", err)
+	}
+}
+
+func writeAgentBytes(ctx context.Context, session *agentSession, data []byte) error {
 	session.writeMu.Lock()
 	defer session.writeMu.Unlock()
 	return session.conn.Write(ctx, websocket.MessageText, data)
@@ -781,7 +803,8 @@ func (s *Server) proxyHTTPForTarget(w http.ResponseWriter, r *http.Request, targ
 	defer func() { s.pendingMu.Lock(); delete(s.pending, requestID); s.pendingMu.Unlock() }()
 	payload := proxyRequest{Type: "proxy_request", RequestID: requestID, InstanceID: instanceID, Method: r.Method, Path: r.URL.RequestURI(), Headers: headers, Body: base64.StdEncoding.EncodeToString(body)}
 	if err := s.writeAgentJSON(r.Context(), session, payload); err != nil {
-		http.Error(w, "proxy send failed", 502)
+		s.logger.Warn("proxy request send failed", "agentId", agentID, "instanceId", instanceID, "requestId", requestID, "error", err)
+		http.Error(w, "proxy send failed: "+err.Error(), 502)
 		return
 	}
 	var response proxyResponse
