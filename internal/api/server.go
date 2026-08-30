@@ -836,6 +836,10 @@ func (s *Server) proxyHTTPForTarget(w http.ResponseWriter, r *http.Request, targ
 	}
 	data, _ := base64.StdEncoding.DecodeString(response.Body)
 	data = injectBrowserCompatibility(response.Headers, data)
+	// Agent bodies are already fully buffered and may have been decompressed;
+	// never forward an Agent's stale framing headers to the browser.
+	w.Header().Del("Content-Length")
+	w.Header().Del("Content-Encoding")
 	if len(data) > 0 {
 		// The body may have changed after HTML compatibility injection.
 		w.Header().Del("Content-Length")
