@@ -89,14 +89,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /manager", s.dashboard)
 	mux.HandleFunc("/dsh/{sessionId}", s.proxySession)
 	mux.HandleFunc("/dsh/{sessionId}/{path...}", s.proxySession)
-	// 无 method 的兜底路由必须保留 POST/PUT/PATCH/DELETE/OPTIONS，dsh RPC 不是 GET。
-	mux.HandleFunc("/{path...}", s.proxyOrNot)
 	mux.HandleFunc("GET /api/v1/auth/me", s.authMe)
 	mux.HandleFunc("POST /api/v1/auth/login", s.authLogin)
 	mux.HandleFunc("POST /api/v1/auth/logout", s.authLogout)
 	mux.HandleFunc("GET /api/v1/admin/pairing", s.adminPairing)
 	mux.HandleFunc("POST /api/v1/admin/pairing/refresh", s.refreshPairing)
-	mux.HandleFunc("DELETE /api/v1/admin/agents/{agentId}", s.revokeAgent)
+	// Keep these routes method-agnostic so a stale dashboard, reverse proxy, or
+	// HTTP client can never fall through to the dsh-target proxy route.
+	mux.HandleFunc("/api/v1/admin/agents/{agentId}", s.revokeAgent)
+	mux.HandleFunc("/api/v1/admin/agents/{agentId}/revoke", s.revokeAgent)
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("POST /api/v1/agents/enroll", s.enroll)
 	mux.HandleFunc("POST /api/v1/agent/heartbeat", s.agentHeartbeat)
@@ -105,7 +106,18 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/instances/{agentId}/{instanceId}/open", s.openInstance)
 	mux.HandleFunc("GET /api/v1/agents", s.adminAgents)
 	mux.HandleFunc("GET /api/v1/instances", s.adminInstances)
-	return loggingMiddleware(mux, s.logger)
+	// Register the catch-all only after every manager endpoint. This keeps a
+	// browser's dsh-target cookie from affecting manager API requests.
+	mux.HandleFunc("/{path...}", s.proxyOrNot)
+	// Dispatch unpair requests before ServeMux matching. This remains reliable
+	// with older Go runtimes and cannot be captured by the dsh proxy fallback.
+	return loggingMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/v1/admin/agents/") && (r.Method == http.MethodPost || r.Method == http.MethodDelete) {
+			s.revokeAgent(w, r)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	}), s.logger)
 }
 
 func (s *Server) Run(ctx context.Context) error {
@@ -638,6 +650,12 @@ func (s *Server) dashboardOrProxy(w http.ResponseWriter, r *http.Request) {
 	s.dashboard(w, r)
 }
 func (s *Server) proxyOrNot(w http.ResponseWriter, r *http.Request) {
+	// Manager API paths must never be forwarded to the selected dsh target,
+	// even when the browser still carries a dsh-target cookie.
+	if strings.HasPrefix(r.URL.Path, "/api/v1/") {
+		writeError(w, http.StatusNotFound, "manager API endpoint not found: "+r.Method+" "+r.URL.Path)
+		return
+	}
 	if r.URL.Path == "/" {
 		s.dashboard(w, r)
 		return
@@ -894,16 +912,35 @@ func isHopHeader(name string) bool {
 }
 
 func (s *Server) revokeAgent(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
+		writeError(w, http.StatusMethodNotAllowed, "POST or DELETE required")
+		return
+	}
 	if !s.authorizeAdmin(w, r) {
 		return
 	}
 	agentID := r.PathValue("agentId")
-	if strings.TrimSpace(agentID) == "" {
+	if agentID == "" {
+		const prefix = "/api/v1/admin/agents/"
+		if strings.HasPrefix(r.URL.Path, prefix) {
+			agentID = strings.Trim(strings.TrimPrefix(r.URL.Path, prefix), "/")
+			agentID = strings.TrimSuffix(agentID, "/revoke")
+		}
+	}
+	if strings.TrimSpace(agentID) == "" || strings.Contains(agentID, "/") {
 		writeError(w, http.StatusBadRequest, "agentId is required")
 		return
 	}
-	if err := s.db.DeleteAgent(agentID); err != nil {
-		writeError(w, http.StatusInternalServerError, "delete agent failed")
+	s.logger.Info("agent pairing delete requested", "agentId", agentID, "method", r.Method, "path", r.URL.Path)
+	agentRows, instanceRows, err := s.db.DeleteAgentWithResult(agentID)
+	if err != nil {
+		s.logger.Error("delete agent failed", "agentId", agentID, "error", err)
+		writeError(w, http.StatusInternalServerError, "delete agent failed: "+err.Error())
+		return
+	}
+	if agentRows == 0 {
+		s.logger.Warn("agent pairing delete found no agent row", "agentId", agentID, "instanceRows", instanceRows)
+		writeError(w, http.StatusNotFound, "agent not found: "+agentID)
 		return
 	}
 	s.sessionsMu.Lock()
@@ -914,7 +951,7 @@ func (s *Server) revokeAgent(w http.ResponseWriter, r *http.Request) {
 		go func() { _ = session.conn.Close(websocket.StatusPolicyViolation, "agent pairing deleted") }()
 	}
 	s.logger.Info("agent pairing deleted", "agentId", agentID)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "agentId": agentID})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": true, "agentId": agentID, "agentRows": agentRows, "instanceRows": instanceRows})
 }
 
 func (s *Server) adminAgents(w http.ResponseWriter, r *http.Request) {
@@ -980,6 +1017,7 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {
 	return true
 }
 func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)

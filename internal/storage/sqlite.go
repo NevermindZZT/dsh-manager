@@ -64,7 +64,8 @@ func Open(path string) (*DB, error) {
 func (db *DB) Close() error { return db.sql.Close() }
 
 func (db *DB) migrate() error {
-	_, err := db.sql.Exec(`PRAGMA journal_mode=WAL;
+	_, err := db.sql.Exec(`PRAGMA foreign_keys=ON;
+PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS agents (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -183,18 +184,40 @@ UPDATE instances SET state='offline', url_available=0, error='agent offline' WHE
 }
 
 func (db *DB) DeleteAgent(id string) error {
+	_, _, err := db.DeleteAgentWithResult(id)
+	return err
+}
+
+// DeleteAgentWithResult removes all rows owned by an Agent and reports the
+// affected row counts so the API cannot claim success for an unknown ID.
+func (db *DB) DeleteAgentWithResult(id string) (agentRows, instanceRows int64, err error) {
 	tx, err := db.sql.BeginTx(context.Background(), nil)
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
 	defer tx.Rollback()
-	if _, err = tx.Exec(`DELETE FROM agents WHERE id=?`, id); err != nil {
-		return err
+	// Instances reference their Agent; remove dependants first so SQLite foreign-key
+	// enforcement cannot reject an otherwise valid unpair operation.
+	instances, err := tx.Exec(`DELETE FROM instances WHERE agent_id=?`, id)
+	if err != nil {
+		return 0, 0, err
 	}
-	if _, err = tx.Exec(`DELETE FROM instances WHERE agent_id=?`, id); err != nil {
-		return err
+	instanceRows, err = instances.RowsAffected()
+	if err != nil {
+		return 0, 0, err
 	}
-	return tx.Commit()
+	agent, err := tx.Exec(`DELETE FROM agents WHERE id=?`, id)
+	if err != nil {
+		return 0, instanceRows, err
+	}
+	agentRows, err = agent.RowsAffected()
+	if err != nil {
+		return 0, instanceRows, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, 0, err
+	}
+	return agentRows, instanceRows, nil
 }
 
 func (db *DB) AuthenticateAgent(id, token string) (bool, error) {

@@ -1,6 +1,6 @@
 # dsh-manager
 
-![Version](https://img.shields.io/badge/version-v0.2.4-blue)
+![Version](https://img.shields.io/badge/version-v0.2.5-blue)
 ![Go](https://img.shields.io/badge/Go-1.26-00ADD8)
 ![Docker](https://img.shields.io/badge/Docker-Hub-2496ED)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -97,7 +97,7 @@ DOCKERHUB_USERNAME
 DOCKERHUB_TOKEN
 ```
 
-推送版本标签（例如 v0.2.4）后，GitHub Actions 会构建 linux/amd64 和 linux/arm64 镜像并推送到 Docker Hub。
+推送版本标签（例如 v0.2.5）后，GitHub Actions 会构建 linux/amd64 和 linux/arm64 镜像并推送到 Docker Hub。
 
 端口：
 
