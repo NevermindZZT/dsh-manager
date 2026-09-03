@@ -11,17 +11,23 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-
-	"golang.org/x/crypto/bcrypt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/coder/websocket"
 
 	"github.com/NevermindZZT/dsh-manager/internal/config"
 	"github.com/NevermindZZT/dsh-manager/internal/storage"
 	"github.com/NevermindZZT/dsh-manager/internal/version"
+)
+
+const (
+	agentMessageReadLimit = 64 << 20
+	proxyHTTPTimeout      = 5 * time.Minute
 )
 
 type Server struct {
@@ -122,8 +128,8 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) Run(ctx context.Context) error {
 	handler := s.Handler()
-	httpServer := &http.Server{Addr: s.cfg.HTTPAddr, Handler: handler, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
-	httpsServer := &http.Server{Addr: s.cfg.AgentHTTPSAddr, Handler: handler, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
+	httpServer := &http.Server{Addr: s.cfg.HTTPAddr, Handler: handler, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: proxyHTTPTimeout, IdleTimeout: 60 * time.Second}
+	httpsServer := &http.Server{Addr: s.cfg.AgentHTTPSAddr, Handler: handler, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: proxyHTTPTimeout, IdleTimeout: 60 * time.Second}
 	tlsErr := make(chan error, 1)
 	go func() {
 		err := httpsServer.ListenAndServeTLS(s.cfg.TLSCertFile, s.cfg.TLSKeyFile)
@@ -345,7 +351,9 @@ func (s *Server) agentConnect(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("accept agent websocket", "agentId", agentID, "error", err)
 		return
 	}
-	conn.SetReadLimit(32 << 20)
+	// proxy_response bodies are Base64-encoded inside the Agent message;
+	// leave headroom for large session.list payloads and JSON framing.
+	conn.SetReadLimit(agentMessageReadLimit)
 	session := &agentSession{agentID: agentID, conn: conn, agentType: "launcher"}
 	s.sessionsMu.Lock()
 	previous := s.sessions[agentID]
@@ -830,7 +838,7 @@ func (s *Server) proxyHTTPForTarget(w http.ResponseWriter, r *http.Request, targ
 	var response proxyResponse
 	select {
 	case response = <-ch:
-	case <-time.After(30 * time.Second):
+	case <-time.After(proxyHTTPTimeout):
 		http.Error(w, "proxy timeout", 504)
 		return
 	}
@@ -839,7 +847,18 @@ func (s *Server) proxyHTTPForTarget(w http.ResponseWriter, r *http.Request, targ
 		http.Error(w, response.Error, 502)
 		return
 	}
-	s.logger.Info("proxy response received", "agentId", agentID, "instanceId", instanceID, "requestId", requestID, "path", r.URL.RequestURI(), "status", response.Status, "bytes", len(response.Body), "cookies", len(response.SetCookies))
+	status := response.Status
+	if status == 0 {
+		status = 502
+	}
+	data, err := base64.StdEncoding.DecodeString(response.Body)
+	if err != nil {
+		s.logger.Warn("proxy response body decode failed", "agentId", agentID, "instanceId", instanceID, "requestId", requestID, "path", r.URL.RequestURI(), "encodedBytes", len(response.Body), "error", err)
+		http.Error(w, "invalid proxy response body", http.StatusBadGateway)
+		return
+	}
+	data = injectBrowserCompatibility(response.Headers, data)
+	s.logger.Info("proxy response received", "agentId", agentID, "instanceId", instanceID, "requestId", requestID, "path", r.URL.RequestURI(), "status", status, "bytes", len(data), "encodedBytes", len(response.Body), "cookies", len(response.SetCookies))
 	for k, v := range response.Headers {
 		if !isHopHeader(k) {
 			w.Header().Set(k, v)
@@ -848,20 +867,12 @@ func (s *Server) proxyHTTPForTarget(w http.ResponseWriter, r *http.Request, targ
 	for _, cookie := range response.SetCookies {
 		w.Header().Add("Set-Cookie", cookie)
 	}
-	status := response.Status
-	if status == 0 {
-		status = 502
-	}
-	data, _ := base64.StdEncoding.DecodeString(response.Body)
-	data = injectBrowserCompatibility(response.Headers, data)
 	// Agent bodies are already fully buffered and may have been decompressed;
-	// never forward an Agent's stale framing headers to the browser.
-	w.Header().Del("Content-Length")
+	// never forward an Agent's stale framing headers to the browser. Set the
+	// actual post-compatibility length so large JSON responses are not left as
+	// an ambiguous chunked stream.
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	w.Header().Del("Content-Encoding")
-	if len(data) > 0 {
-		// The body may have changed after HTML compatibility injection.
-		w.Header().Del("Content-Length")
-	}
 	w.WriteHeader(status)
 	_, _ = w.Write(data)
 }
