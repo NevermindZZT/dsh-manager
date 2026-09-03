@@ -5,7 +5,7 @@ data_dir: "./data"
 # tls_cert_file: "./data/server.crt"
 # tls_key_file: "./data/server.key"
 # database_path: "./data/dsh-manager.db"
-pairing_code: "replace-with-pairing-code"
+# 配对码无需配置；manager 每次启动自动生成并打印新的注册配对码。
 admin_username: "admin"
 admin_password: "replace-with-dashboard-password"
 admin_token: "replace-with-automation-token"

@@ -39,14 +39,13 @@ cd D:\\code\\dsh-launcher\\dsh-manager
 $env:DSH_MANAGER_HTTP_ADDR = "127.0.0.1:18080"
 $env:DSH_MANAGER_AGENT_HTTPS_ADDR = "127.0.0.1:18443"
 $env:DSH_MANAGER_DATA_DIR = "$PWD\\test-data"
-$env:DSH_MANAGER_PAIRING_CODE = "pair-test-001"
 $env:DSH_MANAGER_ADMIN_USERNAME = "admin"
 $env:DSH_MANAGER_ADMIN_PASSWORD = "test-password"
 $env:DSH_MANAGER_ADMIN_TOKEN = "legacy-api-token"
 go run .\\cmd\\dsh-manager
 ```
 
-日志中应出现证书指纹、配对码和 dashboard login loaded from environment。
+日志中应出现证书指纹、每次启动新生成的配对码和 dashboard login loaded from environment。不要把配对码固定写入环境变量；复制本次启动日志中的新码进行首次注册。
 
 浏览器访问：https://127.0.0.1:18443/
 
@@ -61,11 +60,11 @@ HTTP 模式也可以登录，但用户名、密码和 Agent 数据会以明文�
 启用 dsh-manager Agent：勾选
 服务器地址：https://127.0.0.1:18443
 Agent 名称：test-pc
-配对码：pair-test-001
+配对码：复制本次 manager 启动日志中的 pairing code
 TLS 指纹：复制 manager 日志中的 fingerprintSha256
 ```
 
-注意：HTTP 模式填写 http://127.0.0.1:18080，不需要 TLS 指纹；HTTPS 模式填写 https://127.0.0.1:18443，并填写 64 位 SHA-256 TLS 指纹。修改服务器地址或指纹后，旧 Agent 凭证会自动清除，需要重新配对。
+注意：HTTP 模式填写 http://127.0.0.1:18080，不需要 TLS 指纹；HTTPS 模式填写 https://127.0.0.1:18443，并填写 64 位 SHA-256 TLS 指纹。配对码只用于首次注册，manager 刷新或重启生成新码不会使已有 Token 失效。修改服务器地址或指纹后，旧 Agent 凭证会自动清除，需要重新配对。
 
 launcher 日志应出现：
 
@@ -101,7 +100,7 @@ Invoke-RestMethod -Uri "https://127.0.0.1:18443/api/v1/instances/<agentId>/local
 
 ```powershell
 cd D:\\code\\dsh-launcher\\dsh-manager
-$env:DSH_MANAGER_PAIRING_CODE = "pair-docker-001"
+# 配对码由 manager 每次容器启动自动生成，请从 docker compose logs 中复制当前配对码。
 $env:DSH_MANAGER_ADMIN_USERNAME = "admin"
 $env:DSH_MANAGER_ADMIN_PASSWORD = "docker-password"
 $env:DSH_MANAGER_ADMIN_TOKEN = "docker-api-token"
@@ -123,7 +122,7 @@ docker compose down
 cd D:\code\dsh-launcher\dsh-manager-plugin
 npm install
 $env:DSH_MANAGER_URL = "https://127.0.0.1:18443"
-$env:DSH_MANAGER_PAIRING_CODE = "pair-plugin-001"
+$env:DSH_MANAGER_PAIRING_CODE = "复制当前 manager 启动日志中的配对码"
 $env:DSH_MANAGER_NAME = "plugin-dsh"
 $env:DSH_MANAGER_TLS_FINGERPRINT = "复制 manager 指纹"
 ```
@@ -150,7 +149,7 @@ HTTP 和 HTTPS 都支持。HTTP 模式填写 http://服务器:8080；HTTPS 模�
 
 ### invalid agent credentials
 
-launcher 保存了旧 manager 的 Agent ID/Token。修改服务器地址或 TLS 指纹并保存，再填入新的配对码。
+launcher 保存了旧 manager 的 Agent ID/Token。只有 manager 数据库被替换、Agent 被取消配对，或需要注册新 Agent 时，才填写当前启动日志中的新配对码；刷新配对码本身不需要重新填写。
 
 ### Agent 离线
 

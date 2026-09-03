@@ -1,6 +1,6 @@
 # dsh-manager
 
-![Version](https://img.shields.io/badge/version-v0.2.5-blue)
+![Version](https://img.shields.io/badge/version-v0.2.6-blue)
 ![Go](https://img.shields.io/badge/Go-1.26-00ADD8)
 ![Docker](https://img.shields.io/badge/Docker-Hub-2496ED)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -15,7 +15,7 @@
 
 - 独立 Go 工程与 Git 仓库；
 - SQLite Agent / instance registry；
-- 一次性 Agent 配对码；
+- manager 每次启动自动生成一次性 Agent 注册配对码；
 - Agent Token 使用 Windows DPAPI 加密保存在 launcher；
 - 自动生成自签名 TLS 证书；
 - Agent HTTPS / WSS 长连接；
@@ -35,7 +35,7 @@
 $env:DSH_MANAGER_HTTP_ADDR = ":8080"
 $env:DSH_MANAGER_AGENT_HTTPS_ADDR = ":8443"
 $env:DSH_MANAGER_DATA_DIR = "./data"
-$env:DSH_MANAGER_PAIRING_CODE = "paste-a-one-time-code"
+# 配对码由 manager 每次启动自动生成并打印，无需配置 DSH_MANAGER_PAIRING_CODE。
 $env:DSH_MANAGER_ADMIN_USERNAME = "admin"
 $env:DSH_MANAGER_ADMIN_PASSWORD = "change-this-password"
 $env:DSH_MANAGER_ADMIN_TOKEN = "keep-this-private"
@@ -59,17 +59,17 @@ server.key
 
 日志会打印服务器证书 SHA-256 指纹。launcher 设置中必须填写该指纹，不能在公网环境无条件信任自签名证书。
 
-Dashboard 登录使用 DSH_MANAGER_ADMIN_USERNAME 和 DSH_MANAGER_ADMIN_PASSWORD。未设置密码时，manager 会生成随机密码并打印到启动日志。正式部署应通过环境变量或 Secret 注入，不要把密码、Token 或配对码提交到 Git。
+Dashboard 登录使用 DSH_MANAGER_ADMIN_USERNAME 和 DSH_MANAGER_ADMIN_PASSWORD。未设置密码时，manager 会生成随机密码并打印到启动日志。配对码是仅用于首次注册的临时 enrollment secret，manager 每次启动或管理员手动刷新时都会生成新码；已有 Agent Token 不受影响。正式部署应通过环境变量或 Secret 注入，不要把密码或 Token 提交到 Git。
 
 Dashboard 可以访问 http://服务器:8080/ 或 https://服务器:8443/。HTTP 模式适合可信内网；公网或不可信网络应使用 HTTPS/WSS。
 
 ## Docker
 
 ```powershell
-$env:DSH_MANAGER_PAIRING_CODE = "one-time-pairing-code"
 $env:DSH_MANAGER_ADMIN_USERNAME = "admin"
 $env:DSH_MANAGER_ADMIN_PASSWORD = "change-this-password"
 $env:DSH_MANAGER_ADMIN_TOKEN = "long-random-admin-token"
+# 配对码由容器每次启动自动生成并写入日志。
 docker compose pull
 docker compose up -d
 ```
@@ -85,7 +85,7 @@ docker run -d --name dsh-manager `
   -e DSH_MANAGER_AGENT_HTTPS_ADDR=:8443 `
   -e DSH_MANAGER_ADMIN_USERNAME=admin `
   -e DSH_MANAGER_ADMIN_PASSWORD=change-this-password `
-  -e DSH_MANAGER_PAIRING_CODE=change-this-pairing-code `
+`
   -e DSH_MANAGER_ADMIN_TOKEN=change-this-api-token `
   nevermindzzt/dsh-manager:latest
 ```
@@ -97,7 +97,7 @@ DOCKERHUB_USERNAME
 DOCKERHUB_TOKEN
 ```
 
-推送版本标签（例如 v0.2.5）后，GitHub Actions 会构建 linux/amd64 和 linux/arm64 镜像并推送到 Docker Hub。
+推送版本标签（例如 v0.2.6）后，GitHub Actions 会构建 linux/amd64 和 linux/arm64 镜像并推送到 Docker Hub。
 
 端口：
 

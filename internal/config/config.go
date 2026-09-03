@@ -54,11 +54,11 @@ func Load() Config {
 		}
 	}
 	dataDir := envOr("DSH_MANAGER_DATA_DIR", file.DataDir, "./data")
-	pairing := envOr("DSH_MANAGER_PAIRING_CODE", file.PairingCode, "")
-	pairingGenerated := pairing == ""
-	if pairingGenerated {
-		pairing = randomHex(8)
-	}
+	// Pairing codes are ephemeral enrollment secrets. Generate a fresh code
+	// for every manager process instead of reusing a value from YAML/env. Existing
+	// Agent tokens are stored in the database and remain valid across this change.
+	pairing := randomHex(8)
+	pairingGenerated := true
 	admin := envOr("DSH_MANAGER_ADMIN_TOKEN", file.AdminToken, "")
 	adminGenerated := admin == ""
 	if adminGenerated {
