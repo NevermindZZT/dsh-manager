@@ -108,6 +108,29 @@ DOCKERHUB_TOKEN
 
 正式公网部署应在 8080/8443 前配置反向代理和正式 HTTPS 证书（例如 Cloudflare Tunnel）。当前自签名证书主要用于没有公共证书的内网或自托管环境；launcher 通过证书指纹固定验证自签名 manager，使用公共证书反向代理时指纹可留空。
 
+### Cloudflare Tunnel 配置
+
+manager 的两个监听端口必须分别使用匹配的源站协议。manager 自动生成的 10091 证书是自签名证书，因此 cloudflared 连接该端口时需要关闭源站证书校验；这不会关闭用户到 Cloudflare 边缘的 HTTPS 校验：
+
+yaml 示例：
+
+    ingress:
+      # Dashboard、enrollment、heartbeat、Agent WebSocket 都可经由 10090 转发
+      - hostname: dsh.nevermindzzt.top
+        service: http://127.0.0.1:10090
+
+      # 如果使用独立 Agent 域名，10091 必须是 https://，并允许 manager 自签名源站
+      - hostname: dshserver.nevermindzzt.top
+        service: https://127.0.0.1:10091
+        originRequest:
+          noTLSVerify: true
+
+      - service: http_status:404
+
+如果 cloudflared 在 Docker 容器中运行，127.0.0.1 指向的是 cloudflared 容器本身，应改为同一 Docker 网络中的服务名，例如 http://dsh-manager:10090 和 https://dsh-manager:10091。不要把 http://...:10091 指向 HTTPS 端口，否则会收到 Client sent an HTTP request to an HTTPS server；缺少 noTLSVerify: true 通常会收到 Cloudflare 502。修改后执行 cloudflared tunnel ingress validate，并确认同一 hostname 没有旧的重复 ingress/DNS 路由。
+
+客户端只有在 GET /healthz 返回 dsh-manager JSON、POST /api/v1/agents/enroll 返回 manager JSON 错误/成功，而不是 HTML、纯文本 401 或 Cloudflare 502 时，才应使用该域名。
+
 ## 登录 API
 
 Dashboard 使用用户名密码登录，成功后返回 HttpOnly Session Cookie：
