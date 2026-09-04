@@ -57,7 +57,7 @@ server.crt
 server.key
 ```
 
-日志会打印服务器证书 SHA-256 指纹。launcher 设置中必须填写该指纹，不能在公网环境无条件信任自签名证书。
+日志会打印服务器证书 SHA-256 指纹。launcher 直接连接自签名后端时必须填写该指纹；如果通过 Cloudflare Tunnel 或带公共证书的反向代理访问，指纹可留空并按系统公共 CA 校验，无需无条件信任自签名证书。
 
 Dashboard 登录使用 DSH_MANAGER_ADMIN_USERNAME 和 DSH_MANAGER_ADMIN_PASSWORD。未设置密码时，manager 会生成随机密码并打印到启动日志。配对码是仅用于首次注册的临时 enrollment secret，manager 每次启动或管理员手动刷新时都会生成新码；已有 Agent Token 不受影响。正式部署应通过环境变量或 Secret 注入，不要把密码或 Token 提交到 Git。
 
@@ -106,7 +106,7 @@ DOCKERHUB_TOKEN
 8443  Agent HTTPS / WSS 通道
 ```
 
-正式公网部署应在 8080/8443 前配置反向代理和正式 HTTPS 证书。当前自签名证书主要用于没有公共证书的内网或自托管环境；launcher 通过证书指纹固定验证 manager。
+正式公网部署应在 8080/8443 前配置反向代理和正式 HTTPS 证书（例如 Cloudflare Tunnel）。当前自签名证书主要用于没有公共证书的内网或自托管环境；launcher 通过证书指纹固定验证自签名 manager，使用公共证书反向代理时指纹可留空。
 
 ## 登录 API
 
@@ -239,7 +239,7 @@ https://github.com/NevermindZZT/dsh-manager-plugin
 
 - Agent Token 只在配对响应中返回一次；
 - Agent 连接支持 HTTP/WS 和 HTTPS/WSS；
-- HTTPS 模式下 launcher 必须配置 manager 证书指纹；
+- HTTPS 直连自签名 manager 时 launcher 必须配置证书指纹；通过公共证书反向代理可留空指纹并按系统 CA 校验；
 - manager 不保存 SSH 私钥、SSH 密码或 dsh credentials；
 - manager 不提供任意 shell 执行接口；
 - Dashboard 使用 bcrypt 密码哈希和 HttpOnly Session Cookie；
