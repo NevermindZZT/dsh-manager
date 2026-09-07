@@ -5,11 +5,9 @@ services:
     restart: unless-stopped
     ports:
       - "10090:10090"
-      - "10091:10091"
     environment:
       # 监听地址只能填写 host:port，不要带 http:// 或 https://
       DSH_MANAGER_HTTP_ADDR: ":10090"
-      DSH_MANAGER_AGENT_HTTPS_ADDR: ":10091"
       DSH_MANAGER_DATA_DIR: /data
       DSH_MANAGER_ADMIN_USERNAME: ${DSH_MANAGER_ADMIN_USERNAME:-admin}
       DSH_MANAGER_ADMIN_PASSWORD: ${DSH_MANAGER_ADMIN_PASSWORD:?set admin password}

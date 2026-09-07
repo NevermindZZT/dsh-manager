@@ -15,11 +15,7 @@ import (
 type Config struct {
 	ConfigFile             string
 	HTTPAddr               string
-	AgentHTTPSAddr         string
 	DataDir                string
-	TLSCertFile            string
-	TLSKeyFile             string
-	TLSFingerprint         string
 	DatabasePath           string
 	PairingCode            string
 	AdminToken             string
@@ -33,10 +29,7 @@ type Config struct {
 
 type fileConfig struct {
 	HTTPAddr          string `yaml:"http_addr"`
-	AgentHTTPSAddr    string `yaml:"agent_https_addr"`
 	DataDir           string `yaml:"data_dir"`
-	TLSCertFile       string `yaml:"tls_cert_file"`
-	TLSKeyFile        string `yaml:"tls_key_file"`
 	DatabasePath      string `yaml:"database_path"`
 	PairingCode       string `yaml:"pairing_code"`
 	AdminToken        string `yaml:"admin_token"`
@@ -81,10 +74,7 @@ func Load() Config {
 	return Config{
 		ConfigFile:     configFile,
 		HTTPAddr:       envOr("DSH_MANAGER_HTTP_ADDR", file.HTTPAddr, ":8080"),
-		AgentHTTPSAddr: envOr("DSH_MANAGER_AGENT_HTTPS_ADDR", file.AgentHTTPSAddr, ":8443"),
 		DataDir:        dataDir,
-		TLSCertFile:    envOr("DSH_MANAGER_TLS_CERT", file.TLSCertFile, filepath.Join(dataDir, "server.crt")),
-		TLSKeyFile:     envOr("DSH_MANAGER_TLS_KEY", file.TLSKeyFile, filepath.Join(dataDir, "server.key")),
 		DatabasePath:   envOr("DSH_MANAGER_DATABASE", file.DatabasePath, filepath.Join(dataDir, "dsh-manager.db")),
 		PairingCode:    pairing, AdminToken: admin,
 		PairingCodeGenerated: pairingGenerated, AdminTokenGenerated: adminGenerated,

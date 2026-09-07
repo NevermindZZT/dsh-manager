@@ -5,102 +5,110 @@
 manager：Go 1.26+、PowerShell、可选 Docker Desktop。
 launcher：Windows 10/11、.NET 8 SDK、WebView2、Node.js、dsh；SSH 测试需要系统 OpenSSH。
 
+manager 自身只监听一个 HTTP 端口。HTTPS/WSS 仅由外部反向代理提供，测试 manager 本地服务时使用 HTTP/WS。
+
 ## 2. 自动测试
 
 ### manager
 
 ```powershell
-cd D:\\code\\dsh-launcher\\dsh-manager
-$env:GOMODCACHE = "$PWD\\.tools\\gomodcache"
-$env:GOCACHE = "$PWD\\.tools\\gocache"
+cd D:\code\dsh-launcher\dsh-manager
+$env:GOMODCACHE = "$PWD\.tools\gomodcache"
+$env:GOCACHE = "$PWD\.tools\gocache"
 gofmt -w cmd internal
 go test ./...
 go vet ./...
-go build -trimpath -o .\\bin\\dsh-manager.exe .\\cmd\\dsh-manager
+go build -trimpath -o .\bin\dsh-manager.exe .\cmd\dsh-manager
 ```
 
-覆盖：SQLite registry、Agent 配对、heartbeat、管理员 API、Dashboard 首页、登录 Session、WSS 命令分发、浏览器 WebSocket tunnel。
+覆盖：SQLite registry、HTTP enrollment、heartbeat、Dashboard 登录、Agent WS 命令、浏览器 HTTP/WS tunnel、startup bootstrap redirect、Cookie forwarding。
+
+### plugin
+
+```powershell
+cd D:\code\dsh-launcher\dsh-manager-plugin
+npm test
+```
+
+覆盖：HTTP manager transport、enrollment 生命周期、startup token bootstrap、Set-Cookie、authenticated WebSocket Cookie forwarding。
 
 ### launcher
 
 ```powershell
-cd D:\\code\\dsh-launcher\\dsh-launcher
-$env:NUGET_PACKAGES = "$PWD\\.tools\\packages"
-& .\\.tools\\dotnet\\dotnet.exe restore .\\src\\DshLauncher.csproj
-& .\\.tools\\dotnet\\dotnet.exe build .\\src\\DshLauncher.csproj -c Release --no-restore
+cd D:\code\dsh-launcher\dsh-launcher
+$env:NUGET_PACKAGES = "$PWD\.tools\packages"
+& .\.tools\dotnet\dotnet.exe restore .\src\DshLauncher.csproj
+& .\.tools\dotnet\dotnet.exe build .\src\DshLauncher.csproj -c Release --no-restore
 ```
 
-成功标准：0 errors。现有 nullable / WebView2 WindowsBase 警告不影响构建。
+成功标准：0 errors。现有 WebView2 WindowsBase 警告不影响构建。
 
-## 3. 启动 manager
+## 3. 启动隔离 manager
 
 ```powershell
-cd D:\\code\\dsh-launcher\\dsh-manager
+cd D:\code\dsh-launcher\dsh-manager
 $env:DSH_MANAGER_HTTP_ADDR = "127.0.0.1:18080"
-$env:DSH_MANAGER_AGENT_HTTPS_ADDR = "127.0.0.1:18443"
-$env:DSH_MANAGER_DATA_DIR = "$PWD\\test-data"
+$env:DSH_MANAGER_DATA_DIR = "$PWD\test-data"
 $env:DSH_MANAGER_ADMIN_USERNAME = "admin"
 $env:DSH_MANAGER_ADMIN_PASSWORD = "test-password"
 $env:DSH_MANAGER_ADMIN_TOKEN = "legacy-api-token"
-go run .\\cmd\\dsh-manager
+go run .\cmd\dsh-manager
 ```
 
-日志中应出现证书指纹、每次启动新生成的配对码和 dashboard login loaded from environment。不要把配对码固定写入环境变量；复制本次启动日志中的新码进行首次注册。
+从启动日志复制本次 pairing code。不要把 pairing code 固定写入环境变量或提交到 Git。
 
-浏览器访问：https://127.0.0.1:18443/
+Dashboard：
 
-首次访问自签名证书时接受浏览器警告，然后使用：用户名：admin，密码：test-password。
-HTTP 模式也可以登录，但用户名、密码和 Agent 数据会以明文传输，只建议在可信内网使用；公网请使用 HTTPS/WSS。
+```text
+http://127.0.0.1:18080/manager
+```
+
+Dashboard 不应显示 TLS fingerprint，也不应要求接受私有证书警告。
 
 ## 4. launcher Agent 配置
 
-在启动器设置中填写：
-
 ```text
 启用 dsh-manager Agent：勾选
-服务器地址：https://127.0.0.1:18443
+服务器地址：http://127.0.0.1:18080
 Agent 名称：test-pc
 配对码：复制本次 manager 启动日志中的 pairing code
-TLS 指纹：复制 manager 日志中的 fingerprintSha256
+TLS 指纹：不存在，不填写
 ```
 
-注意：HTTP 模式填写 http://127.0.0.1:18080，不需要 TLS 指纹；HTTPS 模式填写 https://127.0.0.1:18443，并填写 64 位 SHA-256 TLS 指纹。配对码只用于首次注册，manager 刷新或重启生成新码不会使已有 Token 失效。修改服务器地址或指纹后，旧 Agent 凭证会自动清除，需要重新配对。
-
-launcher 日志应出现：
+日志应出现：
 
 ```text
 [Manager] Agent 配对成功: agent-...
 [Manager] Agent 通道已连接
 ```
 
-## 5. 生命周期测试
-
-在 Dashboard 依次点击：启动、重启、停止、启动、同步。
-
-兼容的静态 Admin Token API：
+## 5. plugin Agent 配置
 
 ```powershell
-$headers = @{ Authorization = "Bearer legacy-api-token" }
-Invoke-RestMethod -Uri "https://127.0.0.1:18443/api/v1/instances/<agentId>/local/commands" `
-  -Method Post -Headers $headers -SkipCertificateCheck `
-  -ContentType "application/json" -Body '{"action":"restart"}'
+cd D:\code\dsh-launcher\dsh-manager-plugin
+npm install
+$env:DSH_MANAGER_URL = "http://127.0.0.1:18080"
+$env:DSH_MANAGER_PAIRING_CODE = "复制当前 manager 启动日志中的配对码"
+$env:DSH_MANAGER_NAME = "plugin-dsh"
 ```
 
-## 6. WebSocket tunnel 测试
+不要设置任何 TLS fingerprint 环境变量。插件会从 DSH 0.1.2-rc.1 `connection.authenticatedUrl()` 获得 startup URL，并只在内存中保存 token。
 
-1. launcher 中本地 dsh 处于 running；
-2. Dashboard 点击目标实例的“打开 dsh”；
-3. 页面加载 dsh 原生 Web UI；
-4. 打开或创建 dsh session；
-5. 发送消息并验证实时响应；
-6. 对 SSH 实例重复测试；
-7. 关闭 launcher，确认页面断开并释放 tunnel。
+## 6. startup token / WebSocket tunnel 验证
+
+1. launcher 或 plugin 上的本地 dsh 使用 0.1.2-rc.1 启动；
+2. manager Dashboard 点击「打开 dsh」；
+3. 首个根请求通过 Agent 使用 startup token；
+4. dsh 返回的 303 `Location: /` 被改写回 `/dsh/<session>/`；
+5. 浏览器收到 dsh Set-Cookie；
+6. 后续 HTTP 请求不再 bootstrap，但携带 Cookie；
+7. dsh WebSocket 请求携带同一 Cookie 并保持实时通信；
+8. launcher/plugin 日志和 manager 数据库中都不应出现 startup token。
 
 ## 7. Docker 测试
 
 ```powershell
-cd D:\\code\\dsh-launcher\\dsh-manager
-# 配对码由 manager 每次容器启动自动生成，请从 docker compose logs 中复制当前配对码。
+cd D:\code\dsh-launcher\dsh-manager
 $env:DSH_MANAGER_ADMIN_USERNAME = "admin"
 $env:DSH_MANAGER_ADMIN_PASSWORD = "docker-password"
 $env:DSH_MANAGER_ADMIN_TOKEN = "docker-api-token"
@@ -108,53 +116,29 @@ docker compose up -d --build
 docker compose logs -f dsh-manager
 ```
 
-访问 https://服务器地址:8443/，停止服务：
+Compose 只发布一个 manager 端口（默认 `10090`），数据目录不要求固定 UID/GID。公网使用 Cloudflare Tunnel 时，源站配置为：
 
-```powershell
-docker compose down
+```yaml
+ingress:
+  - hostname: dsh.example.com
+    service: http://dsh-manager:10090
+  - service: http_status:404
 ```
 
-## 8. dsh plugin Agent 测试
-
-在运行 dsh 的服务器安装插件依赖并配置：
-
-```powershell
-cd D:\code\dsh-launcher\dsh-manager-plugin
-npm install
-$env:DSH_MANAGER_URL = "https://127.0.0.1:18443"
-$env:DSH_MANAGER_PAIRING_CODE = "复制当前 manager 启动日志中的配对码"
-$env:DSH_MANAGER_NAME = "plugin-dsh"
-$env:DSH_MANAGER_TLS_FINGERPRINT = "复制 manager 指纹"
-```
-
-将插件加载到 dsh profile 后，manager 应看到 agentType 为 `dsh-plugin`，并显示一个 type 为 `plugin` 的实例。验证：
-
-1. Dashboard 点击“打开 dsh”；
-2. 检查普通资源、settings RPC 和插件配置页面；
-3. 创建 dsh session 并验证 WebSocket 实时交互；
-4. 停止 dsh，确认 plugin Agent 自动断开；
-5. 重新启动 dsh，确认 Agent 自动重连。
-
-旧 launcher Agent 的生命周期、HTTP tunnel 和 WebSocket tunnel 测试必须继续通过。
-
-## 9. 常见连接失败
-
-### Agent 通道连接失败
-
-HTTP 和 HTTPS 都支持。HTTP 模式填写 http://服务器:8080；HTTPS 模式填写 https://服务器:8443，并在 launcher 中配置 TLS 指纹。
-
-### TLS 指纹错误
-
-复制 manager 启动日志中的 fingerprintSha256，输入完整 64 位 SHA-256 指纹。
+## 8. 常见连接失败
 
 ### invalid agent credentials
 
-launcher 保存了旧 manager 的 Agent ID/Token。只有 manager 数据库被替换、Agent 被取消配对，或需要注册新 Agent 时，才填写当前启动日志中的新配对码；刷新配对码本身不需要重新填写。
+launcher 保存了旧 manager 的 Agent ID/Token。只有 manager 数据库被替换、Agent 被取消配对，或需要注册新 Agent 时，才填写当前 pairing code；刷新 pairing code 本身不会使已有 Token 失效。
 
 ### Agent 离线
 
-检查 launcher 是否运行、8443 是否放行、防火墙、服务器地址、TLS 指纹，以及 launcher 日志中的 [Manager] 错误。
+检查 manager HTTP 地址、单端口防火墙、launcher/plugin 进程和日志中的 `agent connected`。
 
-### 登录成功但实例操作失败
+### Dashboard 仍显示 TLS fingerprint
 
-刷新 Dashboard，确认 Agent 在线；再检查 manager 日志中的 agent connected 和 agent command result。
+说明访问的是旧 manager 二进制或旧 Docker 镜像。停止旧进程，重建并启动当前版本；当前源码和新构建 Dashboard 不包含 TLS fingerprint 区块。
+
+### 打开 dsh 后 401
+
+确认目标 Agent 是 plugin 0.1.8 或包含 startupUrl 元数据的 launcher，并确认 dsh 是 0.1.2-rc.1。旧 Agent 无法为新 dsh 提供 startup token bootstrap。

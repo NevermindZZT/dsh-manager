@@ -2,7 +2,6 @@ package api
 
 import (
 	"bytes"
-	"crypto/tls"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -24,10 +23,9 @@ func TestDashboardLoginSession(t *testing.T) {
 	hash, _ := bcrypt.GenerateFromPassword([]byte("secret"), bcrypt.DefaultCost)
 	cfg := config.Config{PairingCode: "p", AdminToken: "legacy", AdminUsername: "admin", AdminPasswordHash: string(hash)}
 	srv := NewServer(cfg, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	ts := httptest.NewTLSServer(srv.Handler())
+	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 	client := ts.Client()
-	client.Transport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	body, _ := json.Marshal(map[string]string{"username": "admin", "password": "secret"})
 	resp, err := client.Post(ts.URL+"/api/v1/auth/login", "application/json", bytes.NewReader(body))
 	if err != nil {

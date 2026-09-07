@@ -2,12 +2,14 @@
 
 ## Transport
 
-Agent 连接使用：
+Agent connections use the same manager authority and port:
 
-- HTTPS：配对和兼容的 heartbeat API；
-- WSS：长连接 Agent 控制通道；
-- `Authorization: Bearer <agentToken>`；
-- `X-Agent-Id: <agentId>`。
+- HTTP for enrollment and compatible heartbeat APIs;
+- WS for the long-lived Agent control channel;
+- `Authorization: Bearer <agentToken>`;
+- `X-Agent-Id: <agentId>`.
+
+Manager itself does not terminate TLS or use certificate fingerprints. Deploy an external reverse proxy for HTTPS/WSS when traffic crosses an untrusted network.
 
 Agent Token 由一次性配对码换取，manager 只保存 SHA-256 哈希，launcher 使用 Windows DPAPI 保护本地 Token。
 

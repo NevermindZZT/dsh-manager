@@ -3,7 +3,6 @@ package api
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -24,10 +23,9 @@ func TestAgentWebSocketCommandDispatch(t *testing.T) {
 	}
 	defer db.Close()
 	srv := NewServer(config.Config{PairingCode: "pair-ws", AdminToken: "admin-ws"}, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	ts := httptest.NewTLSServer(srv.Handler())
+	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 	client := ts.Client()
-	client.Transport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	enrollBody := `{"pairingCode":"pair-ws","name":"ws-pc","platform":"windows","launcherVersion":"0.2.0"}`
 	resp, err := client.Post(ts.URL+"/api/v1/agents/enroll", "application/json", bytes.NewBufferString(enrollBody))
 	if err != nil {
@@ -38,7 +36,7 @@ func TestAgentWebSocketCommandDispatch(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&enrolled); err != nil {
 		t.Fatal(err)
 	}
-	wsURL := "wss" + strings.TrimPrefix(ts.URL, "https")
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http")
 	headers := http.Header{"Authorization": []string{"Bearer " + enrolled.AgentToken}, "X-Agent-Id": []string{enrolled.AgentID}}
 	conn, _, err := websocket.Dial(context.Background(), wsURL+"/api/v1/agent/connect", &websocket.DialOptions{HTTPClient: client, HTTPHeader: headers})
 	if err != nil {

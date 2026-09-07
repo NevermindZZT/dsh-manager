@@ -1,139 +1,116 @@
 # dsh-manager
 
-![Version](https://img.shields.io/badge/version-v0.2.7-blue)
+![Version](https://img.shields.io/badge/version-v0.3.0-blue)
 ![Go](https://img.shields.io/badge/Go-1.26-00ADD8)
 ![Docker](https://img.shields.io/badge/Docker-Hub-2496ED)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-![panel](./docs/panel.png)
-
 服务器端 dsh 实例管理服务，使用 Go 编写，可直接运行或通过 Docker 部署。Docker 镜像发布到 `nevermindzzt/dsh-manager`。
+
+> **Transport:** manager 只监听一个 plain HTTP 端口，同时承载 Dashboard、Agent API 和 Agent WebSocket。manager 不生成私有证书、不监听第二个 HTTPS 端口、不使用 TLS 指纹。公网部署请在该 HTTP upstream 前使用 Cloudflare Tunnel 或其他反向代理终止 HTTPS/WSS。
 
 配套 Windows Agent / launcher：[github.com/NevermindZZT/dsh-launcher](https://github.com/NevermindZZT/dsh-launcher)
 
-## 当前功能
+## 功能
 
-- 独立 Go 工程与 Git 仓库；
 - SQLite Agent / instance registry；
-- manager 每次启动自动生成一次性 Agent 注册配对码；
-- Agent Token 使用 Windows DPAPI 加密保存在 launcher；
-- 自动生成自签名 TLS 证书；
-- Agent HTTPS / WSS 长连接；
-- Agent 注册、心跳和多实例状态同步；
+- 每次启动自动生成一次性 Agent 注册配对码；
+- Agent Token 只在 enrollment 响应中返回一次；
+- Agent 注册、心跳、多实例状态同步；
 - 管理员查询 Agent 与 dsh 实例；
-- 管理员通过 WebSocket 下发启动、停止、重启、同步和更新命令；
-- 按浏览器会话选择实例的 dsh HTTP 代理；
-- 移动端友好的内置 Dashboard；
-- Docker / docker-compose 部署；
-- HTTP 与 HTTPS 服务优雅退出。
+- 管理员通过 Agent WebSocket 下发启动、停止、重启、同步和更新命令；
+- 按浏览器会话代理目标 dsh HTTP 与 WebSocket；
+- 兼容 DSH 0.1.2-rc.1 startup token 的一次性 bootstrap；
+- 内置 Dashboard 登录和配对管理；
+- Docker / docker-compose 部署。
 
 ## 快速运行
 
-需要 Go 1.26+。默认读取当前目录的 `config.yaml`，环境变量优先级高于配置文件：
+需要 Go 1.26+。环境变量优先于 `config.yaml`：
 
 ```powershell
 $env:DSH_MANAGER_HTTP_ADDR = ":8080"
-$env:DSH_MANAGER_AGENT_HTTPS_ADDR = ":8443"
 $env:DSH_MANAGER_DATA_DIR = "./data"
-# 配对码由 manager 每次启动自动生成并打印，无需配置 DSH_MANAGER_PAIRING_CODE。
 $env:DSH_MANAGER_ADMIN_USERNAME = "admin"
 $env:DSH_MANAGER_ADMIN_PASSWORD = "change-this-password"
 $env:DSH_MANAGER_ADMIN_TOKEN = "keep-this-private"
 go run ./cmd/dsh-manager
 ```
 
-也可以复制配置模板：
+manager 启动时会打印本次临时 pairing code。已有 Agent Token 不会因为 pairing code 刷新或 manager 重启而失效。
 
-```powershell
-Copy-Item .\config.example.yaml .\config.yaml
-# 编辑 config.yaml 后直接启动
-.\bin\dsh-manager.exe
-```
-
-manager 启动时会在数据目录生成：
+Dashboard：
 
 ```text
-server.crt
-server.key
+http://服务器:8080/manager
 ```
 
-日志会打印服务器证书 SHA-256 指纹。launcher 直接连接自签名后端时必须填写该指纹；如果通过 Cloudflare Tunnel 或带公共证书的反向代理访问，指纹可留空并按系统公共 CA 校验，无需无条件信任自签名证书。
-
-Dashboard 登录使用 DSH_MANAGER_ADMIN_USERNAME 和 DSH_MANAGER_ADMIN_PASSWORD。未设置密码时，manager 会生成随机密码并打印到启动日志。配对码是仅用于首次注册的临时 enrollment secret，manager 每次启动或管理员手动刷新时都会生成新码；已有 Agent Token 不受影响。正式部署应通过环境变量或 Secret 注入，不要把密码或 Token 提交到 Git。
-
-Dashboard 可以访问 http://服务器:8080/ 或 https://服务器:8443/。HTTP 模式适合可信内网；公网或不可信网络应使用 HTTPS/WSS。
+HTTP 只适合 loopback 或可信私有网络。公网访问必须通过外部 HTTPS 反向代理，并将请求转发到 manager 的 HTTP 端口。
 
 ## Docker
+
+仓库中的 `docker-compose.yml` 使用 `10090` 作为唯一 manager 端口：
 
 ```powershell
 $env:DSH_MANAGER_ADMIN_USERNAME = "admin"
 $env:DSH_MANAGER_ADMIN_PASSWORD = "change-this-password"
 $env:DSH_MANAGER_ADMIN_TOKEN = "long-random-admin-token"
-# 配对码由容器每次启动自动生成并写入日志。
 docker compose pull
 docker compose up -d
 ```
 
-也可以直接拉取 Docker Hub 镜像：
+直接运行：
 
 ```powershell
-docker pull nevermindzzt/dsh-manager:latest
 docker run -d --name dsh-manager `
-  -p 8080:8080 -p 8443:8443 `
+  -p 10090:10090 `
   -v ${PWD}/data:/data `
-  -e DSH_MANAGER_HTTP_ADDR=:8080 `
-  -e DSH_MANAGER_AGENT_HTTPS_ADDR=:8443 `
+  -e DSH_MANAGER_HTTP_ADDR=:10090 `
   -e DSH_MANAGER_ADMIN_USERNAME=admin `
   -e DSH_MANAGER_ADMIN_PASSWORD=change-this-password `
-`
   -e DSH_MANAGER_ADMIN_TOKEN=change-this-api-token `
   nevermindzzt/dsh-manager:latest
 ```
 
-发布工作流需要在 GitHub 仓库 Secrets 中配置：
+容器不要求宿主机 bind mount 的 `/data` 预先设置固定 UID/GID；只需要确保容器进程对该目录具有读写权限。
 
-```text
-DOCKERHUB_USERNAME
-DOCKERHUB_TOKEN
+## Cloudflare Tunnel
+
+Cloudflare 负责边缘 HTTPS，源站只需要指向 manager 的单一 HTTP 端口：
+
+```yaml
+ingress:
+  - hostname: dsh.nevermindzzt.top
+    service: http://127.0.0.1:10090
+  - hostname: dshserver.nevermindzzt.top
+    service: http://127.0.0.1:10090
+  - service: http_status:404
 ```
 
-推送版本标签（例如 v0.2.7）后，GitHub Actions 会构建 linux/amd64 和 linux/arm64 镜像并推送到 Docker Hub。
+如果 cloudflared 在 Docker 中运行，使用同一 Docker 网络中的服务名：
 
-端口：
-
-```text
-8080  管理 API / Dashboard HTTP
-8443  Agent HTTPS / WSS 通道
+```yaml
+ingress:
+  - hostname: dshserver.nevermindzzt.top
+    service: http://dsh-manager:10090
+  - service: http_status:404
 ```
 
-正式公网部署应在 8080/8443 前配置反向代理和正式 HTTPS 证书（例如 Cloudflare Tunnel）。当前自签名证书主要用于没有公共证书的内网或自托管环境；launcher 通过证书指纹固定验证自签名 manager，使用公共证书反向代理时指纹可留空。
+不再需要 `noTLSVerify`、第二个 10091 端口或源站私有证书。修改后执行：
 
-### Cloudflare Tunnel 配置
+```text
+cloudflared tunnel ingress validate
+```
 
-manager 的两个监听端口必须分别使用匹配的源站协议。manager 自动生成的 10091 证书是自签名证书，因此 cloudflared 连接该端口时需要关闭源站证书校验；这不会关闭用户到 Cloudflare 边缘的 HTTPS 校验：
+使用域名之前确认：
 
-yaml 示例：
+```text
+GET  /healthz                         -> dsh-manager JSON
+POST /api/v1/agents/enroll            -> manager JSON
+GET  /api/v1/agent/connect (Upgrade)  -> Agent authorization response or WS
+```
 
-    ingress:
-      # Dashboard、enrollment、heartbeat、Agent WebSocket 都可经由 10090 转发
-      - hostname: dsh.nevermindzzt.top
-        service: http://127.0.0.1:10090
-
-      # 如果使用独立 Agent 域名，10091 必须是 https://，并允许 manager 自签名源站
-      - hostname: dshserver.nevermindzzt.top
-        service: https://127.0.0.1:10091
-        originRequest:
-          noTLSVerify: true
-
-      - service: http_status:404
-
-如果 cloudflared 在 Docker 容器中运行，127.0.0.1 指向的是 cloudflared 容器本身，应改为同一 Docker 网络中的服务名，例如 http://dsh-manager:10090 和 https://dsh-manager:10091。不要把 http://...:10091 指向 HTTPS 端口，否则会收到 Client sent an HTTP request to an HTTPS server；缺少 noTLSVerify: true 通常会收到 Cloudflare 502。修改后执行 cloudflared tunnel ingress validate，并确认同一 hostname 没有旧的重复 ingress/DNS 路由。
-
-客户端只有在 GET /healthz 返回 dsh-manager JSON、POST /api/v1/agents/enroll 返回 manager JSON 错误/成功，而不是 HTML、纯文本 401 或 Cloudflare 502 时，才应使用该域名。
-
-## 登录 API
-
-Dashboard 使用用户名密码登录，成功后返回 HttpOnly Session Cookie：
+## Dashboard 登录 API
 
 ```http
 POST /api/v1/auth/login
@@ -142,130 +119,87 @@ Content-Type: application/json
 {"username":"admin","password":"..."}
 ```
 
-旧版 Admin Token 仍可用于自动化 API，Dashboard 不再要求手动输入 Token。
-
-## API
-
-健康检查：
+成功后返回 HttpOnly session cookie。旧版静态 Admin Token 仍可用于自动化 API：
 
 ```http
-GET /healthz
+Authorization: Bearer <adminToken>
 ```
 
-Agent 配对和心跳支持 HTTP 或 HTTPS；公网推荐 HTTPS：
+## Agent Protocol v1
+
+Agent enrollment：
 
 ```http
-POST https://manager.example.com:8443/api/v1/agents/enroll
+POST http://manager.example.com:8080/api/v1/agents/enroll
 Content-Type: application/json
 
 {"pairingCode":"...","name":"Office-PC","platform":"windows","launcherVersion":"0.2.2"}
 ```
 
-响应中的 `agentToken` 只返回一次。launcher 会使用 Windows DPAPI 保护后保存。
-
-Agent WebSocket：
+Agent WebSocket 使用同一 authority 和端口：
 
 ```text
-wss://manager.example.com:8443/api/v1/agent/connect
+ws://manager.example.com:8080/api/v1/agent/connect
 Authorization: Bearer <agentToken>
 X-Agent-Id: <agentId>
 ```
 
-Agent 消息类型：
+通过外部 HTTPS 反向代理时，客户端 URL 使用代理提供的 `https://` / `wss://`，但 proxy upstream 仍是 manager 的 `http://` / `ws://` 单端口。
+
+协议保留 enrollment、register、heartbeat、command_result、proxy_request、proxy_response、proxy_ws_open、proxy_ws_frame 和 proxy_ws_close。未知可选字段必须被旧 Agent 忽略。
+
+## DSH 0.1.2-rc.1 startup token
+
+新版 dsh 的启动 URL 形如：
 
 ```text
-register
-heartbeat
-command_result
+http://127.0.0.1:<port>/?token=<one-time-token>
 ```
 
-实例状态示例：
+manager、launcher 和 plugin 的 bootstrap 约定如下：
 
-```json
-{
-  "type": "heartbeat",
-  "instances": [
-    {
-      "instanceId": "local",
-      "displayName": "本地",
-      "type": "local",
-      "state": "running",
-      "urlAvailable": true,
-      "generation": 1,
-      "eventSeq": 3
-    }
-  ]
-}
-```
-
-管理员查询：
-
-```http
-GET /api/v1/agents
-GET /api/v1/instances
-Authorization: Bearer <adminToken>
-```
-
-管理员下发命令：
-
-```http
-POST /api/v1/instances/{agentId}/{instanceId}/commands
-Authorization: Bearer <adminToken>
-Content-Type: application/json
-
-{"action":"restart"}
-```
-
-支持的命令：
-
-```text
-start
-stop
-restart
-sync
-update
-```
+1. Agent register/heartbeat 可在实例元数据中提供临时 `startupUrl`；
+2. manager 只在 live Agent session 内记录“该实例支持 bootstrap”这一布尔状态，不保存 token；
+3. `/dsh/<session>/` 的首个无 query `GET /` 才会下发 `bootstrap:true`；
+4. Agent 使用自己内存中的 startup URL 请求本地 dsh；
+5. dsh 返回的 `Location: /` 会被 manager 改写回 `/dsh/<session>/`；
+6. dsh 的 Set-Cookie 和浏览器后续 Cookie 会继续通过 HTTP/WS tunnel 转发；
+7. startup URL 不写入 SQLite、Dashboard API、持久化配置或日志。
 
 ## dsh UI 代理
 
-管理员在 Dashboard 中点击「打开 dsh」后，manager 返回唯一的实例 URL：
+管理员点击「打开 dsh」后得到：
 
 ```text
 /dsh/<session-id>/
 ```
 
-浏览器地址栏保持该路径，不再直接使用根路径。dsh 发出的绝对路径请求仍通过实例 Cookie 路由到同一个目标实例。代理覆盖 GET、POST、PUT、PATCH、DELETE、OPTIONS 等 HTTP 方法，以及 HTML、静态资源、REST API、上传下载和 dsh 实时 WebSocket 会话。WebSocket 使用文本/二进制帧转发，并在浏览器、manager、Agent、目标 dsh 之间保持独立的关闭和超时语义。
+manager 代理 HTML、静态资源、REST API、上传下载和 WebSocket。目标 dsh 的 Cookie 在 Agent HTTP 与 WebSocket 请求中保持可用。
 
-## dsh plugin Agent
+## Agent 元数据
 
-除 dsh-launcher 外，manager 还支持在 dsh 进程内运行的直连插件：
+可选实例字段：
 
-```text
-浏览器 -> dsh-manager -> dsh-manager-plugin -> 当前 dsh
+```json
+{
+  "instanceId": "local",
+  "displayName": "本地",
+  "state": "running",
+  "urlAvailable": true,
+  "startupUrl": "http://127.0.0.1:3080/?token=..."
+}
 ```
 
-插件使用同一套 Agent Protocol v1，只增加可选的 agentType、agentVersion、pluginVersion 和 capabilities 字段，不改变旧 launcher 的连接方式。
-
-推荐能力：
-
-- `proxy.http`
-- `proxy.websocket`
-- `settings.host`
-- `plugin.config`
-
-插件仓库和安装说明：
-https://github.com/NevermindZZT/dsh-manager-plugin
-
-插件不能执行 start/stop/restart/update 等 launcher 生命周期命令；dsh 退出后插件连接也会断开。launcher Agent 与 plugin Agent 可以同时连接到同一个 manager。
+`startupUrl` 是瞬时 bearer 信息，只能在内存中的 Agent WebSocket 消息中使用，manager 数据库和实例列表 API 不会返回它。
 
 ## 安全边界
 
-- Agent Token 只在配对响应中返回一次；
-- Agent 连接支持 HTTP/WS 和 HTTPS/WSS；
-- HTTPS 直连自签名 manager 时 launcher 必须配置证书指纹；通过公共证书反向代理可留空指纹并按系统 CA 校验；
+- Agent Token 只在 enrollment 响应中返回一次；
+- pairing code 只用于 enrollment，不会使已有 Agent Token 失效；
+- manager 不生成私有 TLS 证书，也不做证书 pinning；
+- plain HTTP 不提供传输加密，公网必须使用外部 HTTPS/WSS 反向代理；
 - manager 不保存 SSH 私钥、SSH 密码或 dsh credentials；
 - manager 不提供任意 shell 执行接口；
 - Dashboard 使用 bcrypt 密码哈希和 HttpOnly Session Cookie；
-- 静态 Admin Token 仅作为自动化 API 兼容方式；
-- 用户登录、细粒度 RBAC 和审计界面属于后续版本；
-- 不要把当前 HTTP Dashboard 端口直接暴露到不可信公网。
+- startup token 不持久化、不写入日志；
+- 不要把 manager 的 plain HTTP upstream 直接暴露到不可信公网。

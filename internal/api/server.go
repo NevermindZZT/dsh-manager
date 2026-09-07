@@ -49,21 +49,23 @@ type Server struct {
 }
 
 type webTarget struct {
-	AgentID    string
-	InstanceID string
-	ExpiresAt  time.Time
+	AgentID          string
+	InstanceID       string
+	ExpiresAt        time.Time
+	BootstrapPending bool
 }
 
 type agentSession struct {
-	agentID         string
-	conn            *websocket.Conn
-	writeMu         sync.Mutex
-	metadataMu      sync.RWMutex
-	agentType       string
-	agentVersion    string
-	pluginVersion   string
-	capabilities    []string
-	hasCapabilities bool
+	agentID          string
+	conn             *websocket.Conn
+	writeMu          sync.Mutex
+	metadataMu       sync.RWMutex
+	agentType        string
+	agentVersion     string
+	pluginVersion    string
+	capabilities     []string
+	hasCapabilities  bool
+	startupAvailable map[string]bool
 }
 
 type enrollRequest struct {
@@ -127,32 +129,17 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) Run(ctx context.Context) error {
-	handler := s.Handler()
-	httpServer := &http.Server{Addr: s.cfg.HTTPAddr, Handler: handler, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: proxyHTTPTimeout, IdleTimeout: 60 * time.Second}
-	httpsServer := &http.Server{Addr: s.cfg.AgentHTTPSAddr, Handler: handler, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: proxyHTTPTimeout, IdleTimeout: 60 * time.Second}
-	tlsErr := make(chan error, 1)
-	go func() {
-		err := httpsServer.ListenAndServeTLS(s.cfg.TLSCertFile, s.cfg.TLSKeyFile)
-		if !errors.Is(err, http.ErrServerClosed) {
-			tlsErr <- err
-		}
-	}()
+	httpServer := &http.Server{Addr: s.cfg.HTTPAddr, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: proxyHTTPTimeout, IdleTimeout: 60 * time.Second}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = httpServer.Shutdown(shutdownCtx)
-		_ = httpsServer.Shutdown(shutdownCtx)
 	}()
 	if err := httpServer.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
-	select {
-	case err := <-tlsErr:
-		return err
-	default:
-		return nil
-	}
+	return nil
 }
 
 type authRequest struct {
@@ -161,9 +148,6 @@ type authRequest struct {
 }
 
 func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
-	if !requireSecureTransport(w, r) {
-		return
-	}
 	var req authRequest
 	if !decodeJSON(w, r, &req) {
 		return
@@ -224,7 +208,7 @@ func (s *Server) adminPairing(w http.ResponseWriter, r *http.Request) {
 	s.pairingMu.Lock()
 	code := s.pairingCode
 	s.pairingMu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{"pairingCode": code, "tlsFingerprint": s.cfg.TLSFingerprint, "agentHTTPSAddr": s.cfg.AgentHTTPSAddr})
+	writeJSON(w, http.StatusOK, map[string]any{"pairingCode": code})
 }
 func (s *Server) refreshPairing(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeAdmin(w, r) {
@@ -235,7 +219,7 @@ func (s *Server) refreshPairing(w http.ResponseWriter, r *http.Request) {
 	code := s.pairingCode
 	s.pairingMu.Unlock()
 	s.logger.Info("pairing code refreshed")
-	writeJSON(w, http.StatusOK, map[string]any{"pairingCode": code, "tlsFingerprint": s.cfg.TLSFingerprint, "agentHTTPSAddr": s.cfg.AgentHTTPSAddr})
+	writeJSON(w, http.StatusOK, map[string]any{"pairingCode": code})
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
@@ -243,9 +227,6 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) enroll(w http.ResponseWriter, r *http.Request) {
-	if !requireSecureTransport(w, r) {
-		return
-	}
 	var req enrollRequest
 	if !decodeJSON(w, r, &req) {
 		return
@@ -274,9 +255,6 @@ func (s *Server) enroll(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) agentHeartbeat(w http.ResponseWriter, r *http.Request) {
-	if !requireSecureTransport(w, r) {
-		return
-	}
 	agentID, ok := bearerAgent(r)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "agent authorization required")
@@ -328,9 +306,6 @@ type commandRequest struct {
 }
 
 func (s *Server) agentConnect(w http.ResponseWriter, r *http.Request) {
-	if !requireSecureTransport(w, r) {
-		return
-	}
 	agentID, ok := bearerAgent(r)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "agent authorization required")
@@ -354,7 +329,7 @@ func (s *Server) agentConnect(w http.ResponseWriter, r *http.Request) {
 	// proxy_response bodies are Base64-encoded inside the Agent message;
 	// leave headroom for large session.list payloads and JSON framing.
 	conn.SetReadLimit(agentMessageReadLimit)
-	session := &agentSession{agentID: agentID, conn: conn, agentType: "launcher"}
+	session := &agentSession{agentID: agentID, conn: conn, agentType: "launcher", startupAvailable: make(map[string]bool)}
 	s.sessionsMu.Lock()
 	previous := s.sessions[agentID]
 	s.sessions[agentID] = session
@@ -396,16 +371,11 @@ func (s *Server) agentConnect(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("agent disconnected", "agentId", agentID)
 }
 
-func requireSecureTransport(w http.ResponseWriter, r *http.Request) bool {
-	// HTTP is supported for installations without TLS certificates.
-	// Use HTTPS/WSS whenever the manager is reachable over an untrusted network.
-	return true
-}
-
 func (s *Server) handleAgentMessage(agentID string, message agentMessage) error {
 	switch message.Type {
 	case "register", "heartbeat":
 		s.logger.Info("agent state received", "agentId", agentID, "type", message.Type, "name", message.Name, "agentType", message.AgentType, "instances", len(message.Instances), "capabilities", message.Capabilities)
+		s.updateStartupAvailability(agentID, message.Instances)
 		if message.AgentType != "" || len(message.Capabilities) > 0 || message.AgentVersion != "" || message.PluginVersion != "" {
 			if err := s.updateSessionMetadata(agentID, message); err != nil {
 				return err
@@ -435,6 +405,37 @@ func (s *Server) handleAgentMessage(agentID string, message agentMessage) error 
 	default:
 		return fmt.Errorf("unsupported agent message type %q", message.Type)
 	}
+}
+
+func (s *Server) updateStartupAvailability(agentID string, instances []storage.Instance) {
+	s.sessionsMu.RLock()
+	session := s.sessions[agentID]
+	s.sessionsMu.RUnlock()
+	if session == nil {
+		return
+	}
+	available := make(map[string]bool, len(instances))
+	for _, instance := range instances {
+		if strings.TrimSpace(instance.InstanceID) != "" && strings.TrimSpace(instance.StartupURL) != "" {
+			available[instance.InstanceID] = true
+		}
+	}
+	session.metadataMu.Lock()
+	session.startupAvailable = available
+	session.metadataMu.Unlock()
+}
+
+func (s *Server) startupAvailable(agentID, instanceID string) bool {
+	s.sessionsMu.RLock()
+	session := s.sessions[agentID]
+	s.sessionsMu.RUnlock()
+	if session == nil {
+		return false
+	}
+	session.metadataMu.RLock()
+	available := session.startupAvailable[instanceID]
+	session.metadataMu.RUnlock()
+	return available
 }
 
 func normalizeAgentType(value string) string {
@@ -590,6 +591,7 @@ type proxyRequest struct {
 	Path       string            `json:"path"`
 	Headers    map[string]string `json:"headers,omitempty"`
 	Body       string            `json:"body,omitempty"`
+	Bootstrap  bool              `json:"bootstrap,omitempty"`
 }
 
 func (s *Server) openInstance(w http.ResponseWriter, r *http.Request) {
@@ -604,9 +606,10 @@ func (s *Server) openInstance(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "agent is offline")
 		return
 	}
+	bootstrapPending := s.startupAvailable(agentID, instanceID)
 	sessionID := "dsh-" + randomHex(16)
 	s.webTargetsMu.Lock()
-	s.webTargets[sessionID] = webTarget{AgentID: agentID, InstanceID: instanceID, ExpiresAt: time.Now().Add(time.Hour)}
+	s.webTargets[sessionID] = webTarget{AgentID: agentID, InstanceID: instanceID, ExpiresAt: time.Now().Add(time.Hour), BootstrapPending: bootstrapPending}
 	s.webTargetsMu.Unlock()
 	http.SetCookie(w, &http.Cookie{Name: "dsh-target", Value: sessionID, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: 3600})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "url": "/dsh/" + sessionID + "/"})
@@ -620,6 +623,18 @@ func (s *Server) targetForSession(sessionID string) (webTarget, bool) {
 		return webTarget{}, false
 	}
 	return target, true
+}
+
+func (s *Server) consumeBootstrap(sessionID string) bool {
+	s.webTargetsMu.Lock()
+	defer s.webTargetsMu.Unlock()
+	target, ok := s.webTargets[sessionID]
+	if !ok || !target.BootstrapPending {
+		return false
+	}
+	target.BootstrapPending = false
+	s.webTargets[sessionID] = target
+	return true
 }
 
 func (s *Server) proxySession(w http.ResponseWriter, r *http.Request) {
@@ -639,11 +654,12 @@ func (s *Server) proxySession(w http.ResponseWriter, r *http.Request) {
 	}
 	copyReq.URL.Path = path
 	copyReq.URL.RawPath = ""
+	bootstrap := r.Method == http.MethodGet && path == "/" && r.URL.RawQuery == "" && s.consumeBootstrap(sessionID)
 	if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 		s.proxyWebSocket(w, copyReq)
 		return
 	}
-	s.proxyHTTPForTarget(w, copyReq, target)
+	s.proxyHTTPForTarget(w, copyReq, target, sessionID, bootstrap)
 }
 
 func clearTargetCookie(w http.ResponseWriter) {
@@ -720,7 +736,7 @@ func (s *Server) proxyWebSocket(w http.ResponseWriter, r *http.Request) {
 	s.tunnels[requestID] = agentCh
 	s.tunnelMu.Unlock()
 	defer func() { s.tunnelMu.Lock(); delete(s.tunnels, requestID); s.tunnelMu.Unlock() }()
-	open := map[string]any{"type": "proxy_ws_open", "requestId": requestID, "instanceId": instanceID, "path": r.URL.RequestURI()}
+	open := map[string]any{"type": "proxy_ws_open", "requestId": requestID, "instanceId": instanceID, "path": r.URL.RequestURI(), "headers": map[string]string{"Cookie": r.Header.Get("Cookie")}}
 	if err := s.writeAgentJSON(r.Context(), session, open); err != nil {
 		return
 	}
@@ -795,10 +811,10 @@ func (s *Server) proxyHTTP(w http.ResponseWriter, r *http.Request) {
 		s.dashboard(w, r)
 		return
 	}
-	s.proxyHTTPForTarget(w, r, target)
+	s.proxyHTTPForTarget(w, r, target, "", false)
 }
 
-func (s *Server) proxyHTTPForTarget(w http.ResponseWriter, r *http.Request, target webTarget) {
+func (s *Server) proxyHTTPForTarget(w http.ResponseWriter, r *http.Request, target webTarget, sessionID string, bootstrap bool) {
 	agentID, instanceID := target.AgentID, target.InstanceID
 	s.sessionsMu.RLock()
 	session := s.sessions[agentID]
@@ -829,7 +845,7 @@ func (s *Server) proxyHTTPForTarget(w http.ResponseWriter, r *http.Request, targ
 	s.pending[requestID] = ch
 	s.pendingMu.Unlock()
 	defer func() { s.pendingMu.Lock(); delete(s.pending, requestID); s.pendingMu.Unlock() }()
-	payload := proxyRequest{Type: "proxy_request", RequestID: requestID, InstanceID: instanceID, Method: r.Method, Path: r.URL.RequestURI(), Headers: headers, Body: base64.StdEncoding.EncodeToString(body)}
+	payload := proxyRequest{Type: "proxy_request", RequestID: requestID, InstanceID: instanceID, Method: r.Method, Path: r.URL.RequestURI(), Headers: headers, Body: base64.StdEncoding.EncodeToString(body), Bootstrap: bootstrap}
 	if err := s.writeAgentJSON(r.Context(), session, payload); err != nil {
 		s.logger.Warn("proxy request send failed", "agentId", agentID, "instanceId", instanceID, "requestId", requestID, "error", err)
 		http.Error(w, "proxy send failed: "+err.Error(), 502)
@@ -846,6 +862,13 @@ func (s *Server) proxyHTTPForTarget(w http.ResponseWriter, r *http.Request, targ
 		s.logger.Warn("proxy response error", "agentId", agentID, "instanceId", instanceID, "requestId", requestID, "path", r.URL.RequestURI(), "error", response.Error)
 		http.Error(w, response.Error, 502)
 		return
+	}
+	if sessionID != "" {
+		for name, value := range response.Headers {
+			if strings.EqualFold(name, "Location") && strings.HasPrefix(value, "/") && !strings.HasPrefix(value, "//") {
+				response.Headers[name] = "/dsh/" + sessionID + value
+			}
+		}
 	}
 	status := response.Status
 	if status == 0 {

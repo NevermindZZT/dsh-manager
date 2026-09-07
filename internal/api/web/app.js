@@ -34,18 +34,11 @@
     } catch (error) { $("loginError").textContent = error.message; }
   }
   async function logout() { try { await api("/api/v1/auth/logout", { method: "POST" }); } finally { showLogin(); } }
-  function setFingerprint(value) {
-    const node = $("tlsFingerprint");
-    const fingerprint = value || "HTTP 模式无需 TLS 指纹";
-    node.dataset.value = fingerprint;
-    node.textContent = node.dataset.hidden === "true" && value ? "••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••••" : fingerprint;
-  }
   async function loadPairing() {
     const info = await api("/api/v1/admin/pairing");
     $("pairingCode").textContent = info.pairingCode || "";
-    setFingerprint(info.tlsFingerprint);
   }
-  async function refreshPairing() { try { const info = await api("/api/v1/admin/pairing/refresh", { method: "POST" }); $("pairingCode").textContent = info.pairingCode || ""; setFingerprint(info.tlsFingerprint); } catch (error) { $("error").textContent = error.message; } }
+  async function refreshPairing() { try { const info = await api("/api/v1/admin/pairing/refresh", { method: "POST" }); $("pairingCode").textContent = info.pairingCode || ""; } catch (error) { $("error").textContent = error.message; } }
   async function copyText(id) {
     const node = $(id);
     const text = node.dataset.value || node.textContent || "";
@@ -138,15 +131,6 @@
   $("logoutButton").addEventListener("click", logout);
   $("refreshPairing").addEventListener("click", refreshPairing);
   $("copyPairing").addEventListener("click", function () { copyText("pairingCode"); });
-  $("copyFingerprint").addEventListener("click", function () { copyText("tlsFingerprint"); });
-  $("toggleFingerprint").addEventListener("click", function () {
-    const node = $("tlsFingerprint");
-    const hidden = node.dataset.hidden === "true";
-    node.dataset.hidden = hidden ? "false" : "true";
-    node.classList.toggle("revealed", hidden);
-    $("toggleFingerprint").textContent = hidden ? "隐藏 TLS 指纹" : "显示 TLS 指纹";
-    setFingerprint(node.dataset.value || "");
-  });
   $("instances").addEventListener("click", function (event) { const button = event.target.closest("button[data-action]"); if (!button) return; const action = button.dataset.action; if (action === "open") openDsh(button.dataset.agent, button.dataset.instance); else command(action, button.dataset.agent, button.dataset.instance); });
   $("agents").addEventListener("click", function (event) { const button = event.target.closest("button[data-action=revoke]"); if (button) revokeAgent(button.dataset.agent, button); });
   api("/api/v1/auth/me").then(function (result) { showApp(result.username, result.version); return loadData(); }).catch(showLogin);

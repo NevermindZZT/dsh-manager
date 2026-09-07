@@ -38,6 +38,7 @@ type Instance struct {
 	Type         string     `json:"type"`
 	State        string     `json:"state"`
 	URLAvailable bool       `json:"urlAvailable"`
+	StartupURL   string     `json:"startupUrl,omitempty"`
 	Version      string     `json:"version,omitempty"`
 	Generation   int64      `json:"generation"`
 	EventSeq     int64      `json:"eventSeq"`
