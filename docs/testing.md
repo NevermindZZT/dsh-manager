@@ -21,7 +21,7 @@ go vet ./...
 go build -trimpath -o .\bin\dsh-manager.exe .\cmd\dsh-manager
 ```
 
-覆盖：SQLite registry、HTTP enrollment、heartbeat、Dashboard 登录、Agent WS 命令、浏览器 HTTP/WS tunnel、startup bootstrap redirect、Cookie forwarding。
+覆盖：SQLite registry、HTTP enrollment、heartbeat、Dashboard 登录、Agent WS 命令、浏览器 HTTP/WS tunnel、startup bootstrap redirect、Cookie forwarding、gzip 响应转发、哈希静态资源缓存和二进制 HTTP 响应帧回退。
 
 ### plugin
 

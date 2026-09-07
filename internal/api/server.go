@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -28,6 +29,7 @@ import (
 const (
 	agentMessageReadLimit = 64 << 20
 	proxyHTTPTimeout      = 5 * time.Minute
+	proxyWebSocketTimeout = 45 * time.Second
 )
 
 type Server struct {
@@ -354,10 +356,16 @@ func (s *Server) agentConnect(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("agent connected", "agentId", agentID)
 	_ = s.writeAgentMessage(r.Context(), session, agentMessage{Type: "hello", RequestID: "manager"})
 	for {
-		_, data, readErr := conn.Read(r.Context())
+		messageType, data, readErr := conn.Read(r.Context())
 		if readErr != nil {
 			s.logger.Warn("agent websocket read ended", "agentId", agentID, "error", readErr)
 			break
+		}
+		if messageType == websocket.MessageBinary {
+			if err := s.handleAgentBinaryMessage(agentID, data); err != nil {
+				s.logger.Warn("binary agent message failed", "agentId", agentID, "error", err)
+			}
+			continue
 		}
 		var message agentMessage
 		if err := json.Unmarshal(data, &message); err != nil {
@@ -405,6 +413,36 @@ func (s *Server) handleAgentMessage(agentID string, message agentMessage) error 
 	default:
 		return fmt.Errorf("unsupported agent message type %q", message.Type)
 	}
+}
+
+func (s *Server) handleAgentBinaryMessage(agentID string, data []byte) error {
+	separator := bytes.IndexByte(data, '\n')
+	if separator <= 0 {
+		return fmt.Errorf("binary agent message is missing JSON header")
+	}
+	var message agentMessage
+	if err := json.Unmarshal(data[:separator], &message); err != nil {
+		return fmt.Errorf("invalid binary agent message header: %w", err)
+	}
+	if message.Type != "proxy_response_binary" {
+		return fmt.Errorf("unsupported binary agent message type %q", message.Type)
+	}
+	response := proxyResponse{
+		RequestID:    message.RequestID,
+		Status:       message.Status,
+		Headers:      message.Headers,
+		SetCookies:   message.SetCookies,
+		BodyBytes:    append([]byte(nil), data[separator+1:]...),
+		BodyBytesSet: true,
+		Error:        message.Error,
+	}
+	s.pendingMu.Lock()
+	ch := s.pending[message.RequestID]
+	s.pendingMu.Unlock()
+	if ch != nil {
+		ch <- response
+	}
+	return nil
 }
 
 func (s *Server) updateStartupAvailability(agentID string, instances []storage.Instance) {
@@ -487,6 +525,9 @@ func supportsCapability(session *agentSession, capability string) bool {
 	session.metadataMu.RLock()
 	defer session.metadataMu.RUnlock()
 	if !session.hasCapabilities {
+		if capability == "proxy.binary-response-v1" {
+			return false
+		}
 		return session.agentType != "dsh-plugin"
 	}
 	for _, value := range session.capabilities {
@@ -575,23 +616,26 @@ func writeAgentBytes(ctx context.Context, session *agentSession, data []byte) er
 }
 
 type proxyResponse struct {
-	RequestID  string            `json:"requestId"`
-	Status     int               `json:"status"`
-	Headers    map[string]string `json:"headers,omitempty"`
-	SetCookies []string          `json:"setCookies,omitempty"`
-	Body       string            `json:"body,omitempty"`
-	Error      string            `json:"error,omitempty"`
+	RequestID    string            `json:"requestId"`
+	Status       int               `json:"status"`
+	Headers      map[string]string `json:"headers,omitempty"`
+	SetCookies   []string          `json:"setCookies,omitempty"`
+	Body         string            `json:"body,omitempty"`
+	BodyBytes    []byte            `json:"-"`
+	BodyBytesSet bool              `json:"-"`
+	Error        string            `json:"error,omitempty"`
 }
 
 type proxyRequest struct {
-	Type       string            `json:"type"`
-	RequestID  string            `json:"requestId"`
-	InstanceID string            `json:"instanceId"`
-	Method     string            `json:"method"`
-	Path       string            `json:"path"`
-	Headers    map[string]string `json:"headers,omitempty"`
-	Body       string            `json:"body,omitempty"`
-	Bootstrap  bool              `json:"bootstrap,omitempty"`
+	Type           string            `json:"type"`
+	RequestID      string            `json:"requestId"`
+	InstanceID     string            `json:"instanceId"`
+	Method         string            `json:"method"`
+	Path           string            `json:"path"`
+	Headers        map[string]string `json:"headers,omitempty"`
+	Body           string            `json:"body,omitempty"`
+	Bootstrap      bool              `json:"bootstrap,omitempty"`
+	BinaryResponse bool              `json:"binaryResponse,omitempty"`
 }
 
 func (s *Server) openInstance(w http.ResponseWriter, r *http.Request) {
@@ -748,7 +792,7 @@ func (s *Server) proxyWebSocket(w http.ResponseWriter, r *http.Request) {
 			_ = browser.Close(websocket.StatusInternalError, msg.Error)
 			return
 		}
-	case <-time.After(15 * time.Second):
+	case <-time.After(proxyWebSocketTimeout):
 		_ = browser.Close(websocket.StatusTryAgainLater, "tunnel open timeout")
 		return
 	}
@@ -845,7 +889,8 @@ func (s *Server) proxyHTTPForTarget(w http.ResponseWriter, r *http.Request, targ
 	s.pending[requestID] = ch
 	s.pendingMu.Unlock()
 	defer func() { s.pendingMu.Lock(); delete(s.pending, requestID); s.pendingMu.Unlock() }()
-	payload := proxyRequest{Type: "proxy_request", RequestID: requestID, InstanceID: instanceID, Method: r.Method, Path: r.URL.RequestURI(), Headers: headers, Body: base64.StdEncoding.EncodeToString(body), Bootstrap: bootstrap}
+	binaryResponse := supportsCapability(session, "proxy.binary-response-v1")
+	payload := proxyRequest{Type: "proxy_request", RequestID: requestID, InstanceID: instanceID, Method: r.Method, Path: r.URL.RequestURI(), Headers: headers, Body: base64.StdEncoding.EncodeToString(body), Bootstrap: bootstrap, BinaryResponse: binaryResponse}
 	if err := s.writeAgentJSON(r.Context(), session, payload); err != nil {
 		s.logger.Warn("proxy request send failed", "agentId", agentID, "instanceId", instanceID, "requestId", requestID, "error", err)
 		http.Error(w, "proxy send failed: "+err.Error(), 502)
@@ -874,14 +919,19 @@ func (s *Server) proxyHTTPForTarget(w http.ResponseWriter, r *http.Request, targ
 	if status == 0 {
 		status = 502
 	}
-	data, err := base64.StdEncoding.DecodeString(response.Body)
-	if err != nil {
-		s.logger.Warn("proxy response body decode failed", "agentId", agentID, "instanceId", instanceID, "requestId", requestID, "path", r.URL.RequestURI(), "encodedBytes", len(response.Body), "error", err)
-		http.Error(w, "invalid proxy response body", http.StatusBadGateway)
-		return
+	var data []byte
+	if response.BodyBytesSet {
+		data = response.BodyBytes
+	} else {
+		data, err = base64.StdEncoding.DecodeString(response.Body)
+		if err != nil {
+			s.logger.Warn("proxy response body decode failed", "agentId", agentID, "instanceId", instanceID, "requestId", requestID, "path", r.URL.RequestURI(), "encodedBytes", len(response.Body), "error", err)
+			http.Error(w, "invalid proxy response body", http.StatusBadGateway)
+			return
+		}
 	}
 	data = injectBrowserCompatibility(response.Headers, data)
-	s.logger.Info("proxy response received", "agentId", agentID, "instanceId", instanceID, "requestId", requestID, "path", r.URL.RequestURI(), "status", status, "bytes", len(data), "encodedBytes", len(response.Body), "cookies", len(response.SetCookies))
+	s.logger.Info("proxy response received", "agentId", agentID, "instanceId", instanceID, "requestId", requestID, "path", r.URL.RequestURI(), "status", status, "bytes", len(data), "encodedBytes", len(response.Body), "binary", response.BodyBytesSet, "contentEncoding", response.Headers["Content-Encoding"], "cookies", len(response.SetCookies))
 	for k, v := range response.Headers {
 		if !isHopHeader(k) {
 			w.Header().Set(k, v)
@@ -890,12 +940,12 @@ func (s *Server) proxyHTTPForTarget(w http.ResponseWriter, r *http.Request, targ
 	for _, cookie := range response.SetCookies {
 		w.Header().Add("Set-Cookie", cookie)
 	}
-	// Agent bodies are already fully buffered and may have been decompressed;
-	// never forward an Agent's stale framing headers to the browser. Set the
-	// actual post-compatibility length so large JSON responses are not left as
-	// an ambiguous chunked stream.
+	applyProxyCacheHeaders(w, r, status, len(response.SetCookies) > 0)
+	// Agent bodies are fully buffered, so the manager owns the final framing.
+	// Keep Content-Encoding when the Agent preserved a compressed response; the
+	// browser and Cloudflare can then avoid receiving the raw asset bytes.
+	w.Header().Del("Content-Length")
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-	w.Header().Del("Content-Encoding")
 	w.WriteHeader(status)
 	_, _ = w.Write(data)
 }
@@ -935,6 +985,43 @@ func injectBrowserCompatibility(headers map[string]string, data []byte) []byte {
 	insertAt := head + end + 1
 	const script = `<script>(function(){try{if(window.crypto&&typeof window.crypto.randomUUID!=="function"&&window.crypto.getRandomValues){var f=function(){var b=new Uint8Array(16);window.crypto.getRandomValues(b);b[6]=(b[6]&15)|64;b[8]=(b[8]&63)|128;var h=Array.prototype.map.call(b,function(x){return("0"+x.toString(16)).slice(-2)}).join("");return h.slice(0,8)+"-"+h.slice(8,12)+"-"+h.slice(12,16)+"-"+h.slice(16,20)+"-"+h.slice(20)};try{Object.defineProperty(window.crypto,"randomUUID",{value:f,configurable:true})}catch(e){}}}catch(e){}})();</script>`
 	return append(append(append([]byte{}, data[:insertAt]...), []byte(script)...), data[insertAt:]...)
+}
+
+func applyProxyCacheHeaders(w http.ResponseWriter, r *http.Request, status int, hasCookies bool) {
+	if status != http.StatusOK || hasCookies || (r.Method != http.MethodGet && r.Method != http.MethodHead) {
+		return
+	}
+	path := r.URL.Path
+	if !isImmutableAssetPath(path) {
+		return
+	}
+	cacheControl := strings.ToLower(w.Header().Get("Cache-Control"))
+	if strings.Contains(cacheControl, "no-store") || strings.Contains(cacheControl, "private") {
+		return
+	}
+	if cacheControl == "" {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	}
+	addVaryHeader(w, "Accept-Encoding")
+}
+
+func isImmutableAssetPath(path string) bool {
+	if !strings.HasPrefix(path, "/assets/") {
+		return false
+	}
+	name := path[strings.LastIndex(path, "/")+1:]
+	return strings.Contains(name, "-") && strings.Contains(name, ".")
+}
+
+func addVaryHeader(w http.ResponseWriter, value string) {
+	for _, current := range w.Header().Values("Vary") {
+		for _, item := range strings.Split(current, ",") {
+			if strings.EqualFold(strings.TrimSpace(item), value) {
+				return
+			}
+		}
+	}
+	w.Header().Add("Vary", value)
 }
 
 func isHopHeader(name string) bool {

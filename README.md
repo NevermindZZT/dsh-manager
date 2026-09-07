@@ -146,7 +146,7 @@ X-Agent-Id: <agentId>
 
 通过外部 HTTPS 反向代理时，客户端 URL 使用代理提供的 `https://` / `wss://`，但 proxy upstream 仍是 manager 的 `http://` / `ws://` 单端口。
 
-协议保留 enrollment、register、heartbeat、command_result、proxy_request、proxy_response、proxy_ws_open、proxy_ws_frame 和 proxy_ws_close。未知可选字段必须被旧 Agent 忽略。
+协议保留 enrollment、register、heartbeat、command_result、proxy_request、proxy_response、proxy_ws_open、proxy_ws_frame 和 proxy_ws_close。Agent 可声明可选能力 `proxy.binary-response-v1`；manager 会在双方支持时通过二进制响应帧传输 HTTP body，旧 Agent 继续使用兼容的 Base64 JSON。未知可选字段必须被旧 Agent 忽略。
 
 ## DSH 0.1.2-rc.1 startup token
 
@@ -176,7 +176,14 @@ manager、launcher 和 plugin 的 bootstrap 约定如下：
 
 manager 代理 HTML、静态资源、REST API、上传下载和 WebSocket。目标 dsh 的 Cookie 在 Agent HTTP 与 WebSocket 请求中保持可用。
 
-## Agent 元数据
+## 远程访问传输优化
+
+- Agent 请求 dsh 时会根据浏览器的 `Accept-Encoding` 保留 gzip 响应；
+- 带内容 hash 的 `/assets/*` 静态资源返回长期 immutable 缓存头；
+- 新版 Agent 与 manager 协商 `proxy.binary-response-v1` 后，HTTP body 不再经过 Base64 JSON，而是使用二进制 WebSocket 响应帧；
+- 旧 Agent 不声明该能力时自动回退到 Base64 JSON 协议；
+- bootstrap、API、上传下载和 WebSocket 不会套用静态资源 immutable 缓存策略。
+
 
 可选实例字段：
 
