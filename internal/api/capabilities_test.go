@@ -7,7 +7,7 @@ func TestLegacyAndPluginCapabilities(t *testing.T) {
 	if !supportsCapability(legacy, "proxy.http") || !supportsCapability(legacy, "proxy.websocket") {
 		t.Fatal("legacy launcher must retain proxy capabilities")
 	}
-	if supportsCapability(legacy, "proxy.binary-response-v1") || supportsCapability(legacy, "proxy.http-stream-v1") || supportsCapability(legacy, "proxy.binary-websocket-frame-v1") || supportsCapability(legacy, "proxy.cancel-v1") {
+	if supportsCapability(legacy, "proxy.binary-response-v1") || supportsCapability(legacy, "proxy.http-stream-v1") || supportsCapability(legacy, "proxy.binary-websocket-frame-v1") || supportsCapability(legacy, "proxy.cancel-v1") || supportsCapability(legacy, "proxy.http-request-stream-v1") {
 		t.Fatal("legacy launcher must fall back from optional binary transports")
 	}
 	plugin := &agentSession{agentType: "dsh-plugin", hasCapabilities: true, capabilities: []string{"proxy.http"}}

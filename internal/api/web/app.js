@@ -65,8 +65,8 @@
   }
   async function loadData() {
     try {
-      const values = await Promise.all([api("/api/v1/agents"), api("/api/v1/instances"), loadPairing()]);
-      const agents = values[0].agents || [], instances = values[1].instances || [];
+      const values = await Promise.all([api("/api/v1/agents"), api("/api/v1/instances"), loadPairing(), api("/api/v1/admin/diagnostics")]);
+      const agents = values[0].agents || [], instances = values[1].instances || [], diagnostics = values[3] || {};
       $("agentCount").textContent = agents.filter(function (x) { return x.online; }).length;
       $("instanceCount").textContent = instances.length;
       $("runningCount").textContent = instances.filter(function (x) { return x.state === "running"; }).length;

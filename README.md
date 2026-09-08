@@ -19,7 +19,7 @@
 - Agent 注册、心跳、多实例状态同步；
 - 管理员查询 Agent 与 dsh 实例；
 - 管理员通过 Agent WebSocket 下发启动、停止、重启、同步和更新命令；
-- 按浏览器会话代理目标 dsh HTTP 与 WebSocket；
+- 按浏览器会话代理目标 dsh HTTP 与 WebSocket，并以有界优先级队列调度 Agent 出站消息；
 - 兼容 DSH 0.1.2-rc.1 startup token 的一次性 bootstrap；
 - 内置 Dashboard 登录和配对管理；
 - Docker / docker-compose 部署。
