@@ -79,7 +79,7 @@ func TestHTTPProxyPreservesCompressedAssetsAndCacheHeaders(t *testing.T) {
 	resultCh := make(chan *http.Response, 1)
 	go func() {
 		client := &http.Client{Transport: &http.Transport{DisableCompression: true}}
-		result, requestErr := client.Get(ts.URL + "/dsh/" + sessionID + "/assets/index-abc123.js")
+		result, requestErr := client.Get(ts.URL + "/dsh/" + sessionID + "/assets/index-abc123.css")
 		if requestErr != nil {
 			t.Errorf("proxy request failed: %v", requestErr)
 			return
@@ -95,7 +95,7 @@ func TestHTTPProxyPreservesCompressedAssetsAndCacheHeaders(t *testing.T) {
 	if err := json.Unmarshal(requestData, &request); err != nil {
 		t.Fatal(err)
 	}
-	if request.Path != "/assets/index-abc123.js" {
+	if request.Path != "/assets/index-abc123.css" {
 		t.Fatalf("unexpected proxy request path: %q", request.Path)
 	}
 	if !request.BinaryResponse {
@@ -107,7 +107,7 @@ func TestHTTPProxyPreservesCompressedAssetsAndCacheHeaders(t *testing.T) {
 		RequestID: request.RequestID,
 		Status:    http.StatusOK,
 		Headers: map[string]string{
-			"Content-Type":     "application/javascript",
+			"Content-Type":     "text/css",
 			"Content-Encoding": "gzip",
 			"Vary":             "Accept-Encoding",
 		},

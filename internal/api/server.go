@@ -884,6 +884,12 @@ func (s *Server) proxyHTTPForTarget(w http.ResponseWriter, r *http.Request, targ
 			headers[k] = v[0]
 		}
 	}
+	// DSH gates host-backed settings, session history, and workspaces on the
+	// page being loopback. The manager is an authenticated reverse tunnel, so
+	// its compatibility rewrite needs an uncompressed JavaScript response.
+	if requiresBrowserCompatibility(r.URL.Path) {
+		headers["Accept-Encoding"] = "identity"
+	}
 	ch := make(chan proxyResponse, 1)
 	s.pendingMu.Lock()
 	s.pending[requestID] = ch
@@ -966,8 +972,14 @@ func injectBrowserCompatibility(headers map[string]string, data []byte) []byte {
 	contentTypeLower := strings.ToLower(contentType)
 	if strings.Contains(contentTypeLower, "javascript") || strings.Contains(contentTypeLower, "ecmascript") {
 		script := string(data)
+		// Treat an authenticated manager tunnel as the same privileged surface as
+		// the local DSH page. This enables host-backed settings, history, and
+		// workspaces without exposing the upstream DSH listener.
 		script = strings.ReplaceAll(script, `connection.isLoopback ? "host" : "memory"`, `"host"`)
 		script = strings.ReplaceAll(script, `connection.isLoopback?"host":"memory"`, `"host"`)
+		script = strings.ReplaceAll(script, `ctx.remote.$host.isLoopback ? "host" : "memory"`, `"host"`)
+		script = strings.ReplaceAll(script, `ctx.remote.$host.isLoopback?"host":"memory"`, `"host"`)
+		script = strings.ReplaceAll(script, `isLoopback: transport?.ownsHost === true || pageLocation === void 0 || isLoopbackHostname(pageLocation.hostname)`, `isLoopback: true`)
 		return []byte(script)
 	}
 	if !strings.Contains(contentTypeLower, "text/html") {
@@ -1003,6 +1015,10 @@ func applyProxyCacheHeaders(w http.ResponseWriter, r *http.Request, status int, 
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	}
 	addVaryHeader(w, "Accept-Encoding")
+}
+
+func requiresBrowserCompatibility(path string) bool {
+	return strings.HasSuffix(strings.ToLower(path), ".js")
 }
 
 func isImmutableAssetPath(path string) bool {
