@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -30,6 +31,10 @@ const (
 	agentMessageReadLimit = 64 << 20
 	proxyHTTPTimeout      = 5 * time.Minute
 	proxyWebSocketTimeout = 45 * time.Second
+	proxyChunkSize        = 64 << 10
+	proxyStreamQueue      = 8
+	tunnelQueue           = 32
+	proxyHTTPMaxInFlight  = 16
 )
 
 type Server struct {
@@ -41,13 +46,14 @@ type Server struct {
 	sessionsMu     sync.RWMutex
 	sessions       map[string]*agentSession
 	pendingMu      sync.Mutex
-	pending        map[string]chan proxyResponse
+	pending        map[string]*proxyStream
 	tunnelMu       sync.Mutex
 	tunnels        map[string]chan agentMessage
 	webTargetsMu   sync.RWMutex
 	webTargets     map[string]webTarget
 	sessionsAuthMu sync.Mutex
 	authSessions   map[string]time.Time
+	proxyStats     proxyStats
 }
 
 type webTarget struct {
@@ -68,6 +74,29 @@ type agentSession struct {
 	capabilities     []string
 	hasCapabilities  bool
 	startupAvailable map[string]bool
+	activeHTTP       atomic.Int64
+}
+
+type proxyStats struct {
+	httpRejected   atomic.Uint64
+	streamOverflow atomic.Uint64
+	tunnelDropped  atomic.Uint64
+}
+
+func (s *agentSession) tryAcquireHTTP() bool {
+	for {
+		active := s.activeHTTP.Load()
+		if active >= proxyHTTPMaxInFlight {
+			return false
+		}
+		if s.activeHTTP.CompareAndSwap(active, active+1) {
+			return true
+		}
+	}
+}
+
+func (s *agentSession) releaseHTTP() {
+	s.activeHTTP.Add(-1)
 }
 
 type enrollRequest struct {
@@ -90,7 +119,7 @@ type heartbeatRequest struct {
 }
 
 func NewServer(cfg config.Config, db *storage.DB, logger *slog.Logger) *Server {
-	return &Server{cfg: cfg, db: db, logger: logger, pairingCode: cfg.PairingCode, sessions: make(map[string]*agentSession), pending: make(map[string]chan proxyResponse), tunnels: make(map[string]chan agentMessage), webTargets: make(map[string]webTarget), authSessions: make(map[string]time.Time)}
+	return &Server{cfg: cfg, db: db, logger: logger, pairingCode: cfg.PairingCode, sessions: make(map[string]*agentSession), pending: make(map[string]*proxyStream), tunnels: make(map[string]chan agentMessage), webTargets: make(map[string]webTarget), authSessions: make(map[string]time.Time)}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -299,7 +328,10 @@ type agentMessage struct {
 	Headers       map[string]string  `json:"headers,omitempty"`
 	SetCookies    []string           `json:"setCookies,omitempty"`
 	Body          string             `json:"body,omitempty"`
+	BodyBytes     []byte             `json:"-"`
 	FrameType     string             `json:"frameType,omitempty"`
+	Stream        bool               `json:"stream,omitempty"`
+	Final         bool               `json:"final,omitempty"`
 }
 
 type commandRequest struct {
@@ -393,22 +425,24 @@ func (s *Server) handleAgentMessage(agentID string, message agentMessage) error 
 	case "command_result":
 		s.logger.Info("agent command result", "agentId", agentID, "requestId", message.RequestID, "instanceId", message.InstanceID, "ok", message.OK, "error", message.Error)
 		return nil
-	case "proxy_response":
+	case "proxy_response", "proxy_response_start":
 		response := proxyResponse{RequestID: message.RequestID, Status: message.Status, Headers: message.Headers, SetCookies: message.SetCookies, Body: message.Body, Error: message.Error}
-		s.pendingMu.Lock()
-		ch := s.pending[message.RequestID]
-		s.pendingMu.Unlock()
-		if ch != nil {
-			ch <- response
+		if stream := s.pendingStream(message.RequestID); stream != nil {
+			stream.deliverHeader(response)
+		}
+		return nil
+	case "proxy_response_end":
+		if stream := s.pendingStream(message.RequestID); stream != nil {
+			if message.Error != "" {
+				stream.fail(errors.New(message.Error))
+			} else if !stream.deliverChunk(proxyChunk{final: true}) {
+				overflows := s.proxyStats.streamOverflow.Add(1)
+				s.logger.Warn("proxy response stream final marker dropped", "agentId", agentID, "requestId", message.RequestID, "overflows", overflows)
+			}
 		}
 		return nil
 	case "proxy_ws_open_result", "proxy_ws_frame", "proxy_ws_close":
-		s.tunnelMu.Lock()
-		ch := s.tunnels[message.RequestID]
-		s.tunnelMu.Unlock()
-		if ch != nil {
-			ch <- message
-		}
+		s.dispatchTunnelMessage(message.RequestID, message)
 		return nil
 	default:
 		return fmt.Errorf("unsupported agent message type %q", message.Type)
@@ -424,23 +458,22 @@ func (s *Server) handleAgentBinaryMessage(agentID string, data []byte) error {
 	if err := json.Unmarshal(data[:separator], &message); err != nil {
 		return fmt.Errorf("invalid binary agent message header: %w", err)
 	}
-	if message.Type != "proxy_response_binary" {
+	payload := append([]byte(nil), data[separator+1:]...)
+	switch message.Type {
+	case "proxy_response_binary":
+		if stream := s.pendingStream(message.RequestID); stream != nil {
+			stream.deliverHeader(proxyResponse{RequestID: message.RequestID, Status: message.Status, Headers: message.Headers, SetCookies: message.SetCookies, BodyBytes: payload, BodyBytesSet: true, Error: message.Error})
+		}
+	case "proxy_response_chunk_binary":
+		if stream := s.pendingStream(message.RequestID); stream != nil && !stream.deliverChunk(proxyChunk{data: payload, final: message.Final}) {
+			overflows := s.proxyStats.streamOverflow.Add(1)
+			s.logger.Warn("proxy response stream exceeded bounded buffer", "agentId", agentID, "requestId", message.RequestID, "overflows", overflows)
+		}
+	case "proxy_ws_frame_binary":
+		message.BodyBytes = payload
+		s.dispatchTunnelMessage(message.RequestID, message)
+	default:
 		return fmt.Errorf("unsupported binary agent message type %q", message.Type)
-	}
-	response := proxyResponse{
-		RequestID:    message.RequestID,
-		Status:       message.Status,
-		Headers:      message.Headers,
-		SetCookies:   message.SetCookies,
-		BodyBytes:    append([]byte(nil), data[separator+1:]...),
-		BodyBytesSet: true,
-		Error:        message.Error,
-	}
-	s.pendingMu.Lock()
-	ch := s.pending[message.RequestID]
-	s.pendingMu.Unlock()
-	if ch != nil {
-		ch <- response
 	}
 	return nil
 }
@@ -525,10 +558,18 @@ func supportsCapability(session *agentSession, capability string) bool {
 	session.metadataMu.RLock()
 	defer session.metadataMu.RUnlock()
 	if !session.hasCapabilities {
-		if capability == "proxy.binary-response-v1" {
+		// A legacy launcher predates capability negotiation. Preserve only its
+		// original command/HTTP/WebSocket contract; every later optimization is
+		// opt-in so the manager never sends an unknown message shape.
+		if session.agentType == "dsh-plugin" {
 			return false
 		}
-		return session.agentType != "dsh-plugin"
+		switch capability {
+		case "command", "proxy.http", "proxy.websocket":
+			return true
+		default:
+			return false
+		}
 	}
 	for _, value := range session.capabilities {
 		if value == capability {
@@ -615,6 +656,12 @@ func writeAgentBytes(ctx context.Context, session *agentSession, data []byte) er
 	return session.conn.Write(ctx, websocket.MessageText, data)
 }
 
+func writeAgentBinary(ctx context.Context, session *agentSession, message agentMessage, data []byte) error {
+	session.writeMu.Lock()
+	defer session.writeMu.Unlock()
+	return session.conn.Write(ctx, websocket.MessageBinary, proxyBinaryMessage(message, data))
+}
+
 type proxyResponse struct {
 	RequestID    string            `json:"requestId"`
 	Status       int               `json:"status"`
@@ -624,6 +671,92 @@ type proxyResponse struct {
 	BodyBytes    []byte            `json:"-"`
 	BodyBytesSet bool              `json:"-"`
 	Error        string            `json:"error,omitempty"`
+}
+
+type proxyChunk struct {
+	data  []byte
+	final bool
+}
+
+// proxyStream keeps each proxied response isolated. Its bounded channels ensure a
+// slow browser cannot stall the Agent connection's single reader goroutine.
+type proxyStream struct {
+	headers chan proxyResponse
+	chunks  chan proxyChunk
+	errors  chan error
+}
+
+func newProxyStream() *proxyStream {
+	return &proxyStream{
+		headers: make(chan proxyResponse, 1),
+		chunks:  make(chan proxyChunk, proxyStreamQueue),
+		errors:  make(chan error, 1),
+	}
+}
+
+func (p *proxyStream) fail(err error) {
+	select {
+	case p.errors <- err:
+	default:
+	}
+}
+
+func (p *proxyStream) deliverHeader(response proxyResponse) {
+	select {
+	case p.headers <- response:
+	default:
+		p.fail(errors.New("duplicate proxy response header"))
+	}
+}
+
+func (p *proxyStream) deliverChunk(chunk proxyChunk) bool {
+	select {
+	case p.chunks <- chunk:
+		return true
+	default:
+		p.fail(errors.New("proxy response stream exceeded bounded buffer"))
+		return false
+	}
+}
+
+func (s *Server) pendingStream(requestID string) *proxyStream {
+	s.pendingMu.Lock()
+	stream := s.pending[requestID]
+	s.pendingMu.Unlock()
+	return stream
+}
+
+func (s *Server) dispatchTunnelMessage(requestID string, message agentMessage) {
+	s.tunnelMu.Lock()
+	ch := s.tunnels[requestID]
+	s.tunnelMu.Unlock()
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- message:
+	default:
+		dropped := s.proxyStats.tunnelDropped.Add(1)
+		s.logger.Warn("dropping agent websocket tunnel message for slow browser", "requestId", requestID, "type", message.Type, "dropped", dropped)
+	}
+}
+
+func (s *Server) cancelProxyRequest(session *agentSession, requestID, instanceID, reason string) {
+	if !supportsCapability(session, "proxy.cancel-v1") {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := s.writeAgentJSON(ctx, session, map[string]string{"type": "proxy_cancel", "requestId": requestID, "instanceId": instanceID, "reason": reason}); err != nil {
+		s.logger.Warn("proxy cancel send failed", "agentId", session.agentID, "requestId", requestID, "reason", reason, "error", err)
+		return
+	}
+	s.logger.Info("proxy request canceled", "agentId", session.agentID, "requestId", requestID, "instanceId", instanceID, "reason", reason)
+}
+
+func proxyBinaryMessage(message agentMessage, data []byte) []byte {
+	header, _ := json.Marshal(message)
+	return append(append(header, '\n'), data...)
 }
 
 type proxyRequest struct {
@@ -636,6 +769,7 @@ type proxyRequest struct {
 	Body           string            `json:"body,omitempty"`
 	Bootstrap      bool              `json:"bootstrap,omitempty"`
 	BinaryResponse bool              `json:"binaryResponse,omitempty"`
+	StreamResponse bool              `json:"streamResponse,omitempty"`
 }
 
 func (s *Server) openInstance(w http.ResponseWriter, r *http.Request) {
@@ -775,12 +909,13 @@ func (s *Server) proxyWebSocket(w http.ResponseWriter, r *http.Request) {
 	browser.SetReadLimit(32 << 20)
 	defer browser.CloseNow()
 	requestID := "ws-" + randomHex(12)
-	agentCh := make(chan agentMessage, 32)
+	agentCh := make(chan agentMessage, tunnelQueue)
 	s.tunnelMu.Lock()
 	s.tunnels[requestID] = agentCh
 	s.tunnelMu.Unlock()
 	defer func() { s.tunnelMu.Lock(); delete(s.tunnels, requestID); s.tunnelMu.Unlock() }()
-	open := map[string]any{"type": "proxy_ws_open", "requestId": requestID, "instanceId": instanceID, "path": r.URL.RequestURI(), "headers": map[string]string{"Cookie": r.Header.Get("Cookie")}}
+	binaryFrames := supportsCapability(session, "proxy.binary-websocket-frame-v1")
+	open := map[string]any{"type": "proxy_ws_open", "requestId": requestID, "instanceId": instanceID, "path": r.URL.RequestURI(), "headers": map[string]string{"Cookie": r.Header.Get("Cookie")}, "binaryFrames": binaryFrames}
 	if err := s.writeAgentJSON(r.Context(), session, open); err != nil {
 		return
 	}
@@ -804,30 +939,43 @@ func (s *Server) proxyWebSocket(w http.ResponseWriter, r *http.Request) {
 				frames <- agentMessage{Type: "proxy_ws_close", RequestID: requestID, Error: readErr.Error()}
 				return
 			}
-			frames <- agentMessage{Type: "proxy_ws_frame", RequestID: requestID, FrameType: frameType(typ), Body: base64.StdEncoding.EncodeToString(data)}
+			if binaryFrames {
+				frames <- agentMessage{Type: "proxy_ws_frame_binary", RequestID: requestID, FrameType: frameType(typ), BodyBytes: data}
+			} else {
+				frames <- agentMessage{Type: "proxy_ws_frame", RequestID: requestID, FrameType: frameType(typ), Body: base64.StdEncoding.EncodeToString(data)}
+			}
 		}
 	}()
 	for {
 		select {
 		case msg := <-agentCh:
 			switch msg.Type {
-			case "proxy_ws_frame":
-				data, e := base64.StdEncoding.DecodeString(msg.Body)
-				if e == nil {
-					mt := websocket.MessageText
-					if msg.FrameType == "binary" {
-						mt = websocket.MessageBinary
+			case "proxy_ws_frame", "proxy_ws_frame_binary":
+				data := msg.BodyBytes
+				if msg.Type == "proxy_ws_frame" {
+					var e error
+					data, e = base64.StdEncoding.DecodeString(msg.Body)
+					if e != nil {
+						continue
 					}
-					if e = browser.Write(ctx, mt, data); e != nil {
-						return
-					}
+				}
+				mt := websocket.MessageText
+				if msg.FrameType == "binary" {
+					mt = websocket.MessageBinary
+				}
+				if err := browser.Write(ctx, mt, data); err != nil {
+					return
 				}
 			case "proxy_ws_close":
 				_ = browser.Close(websocket.StatusNormalClosure, msg.Error)
 				return
 			}
 		case frame := <-frames:
-			_ = s.writeAgentJSON(ctx, session, frame)
+			if frame.Type == "proxy_ws_frame_binary" {
+				_ = writeAgentBinary(ctx, session, frame, frame.BodyBytes)
+			} else {
+				_ = s.writeAgentJSON(ctx, session, frame)
+			}
 			if frame.Type == "proxy_ws_close" {
 				return
 			}
@@ -874,9 +1022,17 @@ func (s *Server) proxyHTTPForTarget(w http.ResponseWriter, r *http.Request, targ
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, 16<<20))
 	if err != nil {
-		http.Error(w, "read request failed", 400)
+		http.Error(w, "read request failed", http.StatusBadRequest)
 		return
 	}
+	if !session.tryAcquireHTTP() {
+		rejected := s.proxyStats.httpRejected.Add(1)
+		w.Header().Set("Retry-After", "1")
+		s.logger.Warn("proxy request rejected at per-agent limit", "agentId", agentID, "instanceId", instanceID, "limit", proxyHTTPMaxInFlight, "rejected", rejected)
+		http.Error(w, "too many active proxy requests", http.StatusTooManyRequests)
+		return
+	}
+	defer session.releaseHTTP()
 	requestID := "proxy-" + randomHex(12)
 	headers := map[string]string{}
 	for k, v := range r.Header {
@@ -884,34 +1040,40 @@ func (s *Server) proxyHTTPForTarget(w http.ResponseWriter, r *http.Request, targ
 			headers[k] = v[0]
 		}
 	}
-	// DSH gates host-backed settings, session history, and workspaces on the
-	// page being loopback. The manager is an authenticated reverse tunnel, so
-	// its compatibility rewrite needs an uncompressed JavaScript response.
 	if requiresBrowserCompatibility(r.URL.Path) {
 		headers["Accept-Encoding"] = "identity"
 	}
-	ch := make(chan proxyResponse, 1)
+	// Keep DSH control/data endpoints on the proven buffered transport. Stream
+	// only immutable GET/HEAD assets: their body is non-personalized, cacheable,
+	// and cannot affect the remote mux or settings/session boot sequence.
+	streamResponse := supportsCapability(session, "proxy.http-stream-v1") && isSafeStreamAssetRequest(r)
+	stream := newProxyStream()
 	s.pendingMu.Lock()
-	s.pending[requestID] = ch
+	s.pending[requestID] = stream
 	s.pendingMu.Unlock()
 	defer func() { s.pendingMu.Lock(); delete(s.pending, requestID); s.pendingMu.Unlock() }()
-	binaryResponse := supportsCapability(session, "proxy.binary-response-v1")
-	payload := proxyRequest{Type: "proxy_request", RequestID: requestID, InstanceID: instanceID, Method: r.Method, Path: r.URL.RequestURI(), Headers: headers, Body: base64.StdEncoding.EncodeToString(body), Bootstrap: bootstrap, BinaryResponse: binaryResponse}
+	payload := proxyRequest{Type: "proxy_request", RequestID: requestID, InstanceID: instanceID, Method: r.Method, Path: r.URL.RequestURI(), Headers: headers, Body: base64.StdEncoding.EncodeToString(body), Bootstrap: bootstrap, BinaryResponse: supportsCapability(session, "proxy.binary-response-v1"), StreamResponse: streamResponse}
 	if err := s.writeAgentJSON(r.Context(), session, payload); err != nil {
 		s.logger.Warn("proxy request send failed", "agentId", agentID, "instanceId", instanceID, "requestId", requestID, "error", err)
-		http.Error(w, "proxy send failed: "+err.Error(), 502)
+		http.Error(w, "proxy send failed: "+err.Error(), http.StatusBadGateway)
 		return
 	}
 	var response proxyResponse
 	select {
-	case response = <-ch:
+	case response = <-stream.headers:
+	case err := <-stream.errors:
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	case <-r.Context().Done():
+		s.cancelProxyRequest(session, requestID, instanceID, "client_disconnected")
+		return
 	case <-time.After(proxyHTTPTimeout):
-		http.Error(w, "proxy timeout", 504)
+		http.Error(w, "proxy timeout", http.StatusGatewayTimeout)
 		return
 	}
 	if response.Error != "" {
 		s.logger.Warn("proxy response error", "agentId", agentID, "instanceId", instanceID, "requestId", requestID, "path", r.URL.RequestURI(), "error", response.Error)
-		http.Error(w, response.Error, 502)
+		http.Error(w, response.Error, http.StatusBadGateway)
 		return
 	}
 	if sessionID != "" {
@@ -923,21 +1085,8 @@ func (s *Server) proxyHTTPForTarget(w http.ResponseWriter, r *http.Request, targ
 	}
 	status := response.Status
 	if status == 0 {
-		status = 502
+		status = http.StatusBadGateway
 	}
-	var data []byte
-	if response.BodyBytesSet {
-		data = response.BodyBytes
-	} else {
-		data, err = base64.StdEncoding.DecodeString(response.Body)
-		if err != nil {
-			s.logger.Warn("proxy response body decode failed", "agentId", agentID, "instanceId", instanceID, "requestId", requestID, "path", r.URL.RequestURI(), "encodedBytes", len(response.Body), "error", err)
-			http.Error(w, "invalid proxy response body", http.StatusBadGateway)
-			return
-		}
-	}
-	data = injectBrowserCompatibility(response.Headers, data)
-	s.logger.Info("proxy response received", "agentId", agentID, "instanceId", instanceID, "requestId", requestID, "path", r.URL.RequestURI(), "status", status, "bytes", len(data), "encodedBytes", len(response.Body), "binary", response.BodyBytesSet, "contentEncoding", response.Headers["Content-Encoding"], "cookies", len(response.SetCookies))
 	for k, v := range response.Headers {
 		if !isHopHeader(k) {
 			w.Header().Set(k, v)
@@ -947,9 +1096,42 @@ func (s *Server) proxyHTTPForTarget(w http.ResponseWriter, r *http.Request, targ
 		w.Header().Add("Set-Cookie", cookie)
 	}
 	applyProxyCacheHeaders(w, r, status, len(response.SetCookies) > 0)
-	// Agent bodies are fully buffered, so the manager owns the final framing.
-	// Keep Content-Encoding when the Agent preserved a compressed response; the
-	// browser and Cloudflare can then avoid receiving the raw asset bytes.
+	if streamResponse {
+		// A stream start commits headers. Never synthesize Content-Length: chunks
+		// are forwarded as received and net/http selects its safe final framing.
+		w.Header().Del("Content-Length")
+		w.WriteHeader(status)
+		for {
+			select {
+			case chunk := <-stream.chunks:
+				if len(chunk.data) > 0 {
+					if _, err := w.Write(chunk.data); err != nil {
+						return
+					}
+				}
+				if chunk.final {
+					return
+				}
+			case err := <-stream.errors:
+				s.logger.Warn("proxy response stream aborted", "requestId", requestID, "error", err)
+				return
+			case <-r.Context().Done():
+				s.cancelProxyRequest(session, requestID, instanceID, "client_disconnected")
+				return
+			}
+		}
+	}
+	var data []byte
+	if response.BodyBytesSet {
+		data = response.BodyBytes
+	} else {
+		data, err = base64.StdEncoding.DecodeString(response.Body)
+		if err != nil {
+			http.Error(w, "invalid proxy response body", http.StatusBadGateway)
+			return
+		}
+	}
+	data = injectBrowserCompatibility(response.Headers, data)
 	w.Header().Del("Content-Length")
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	w.WriteHeader(status)
@@ -1015,6 +1197,13 @@ func applyProxyCacheHeaders(w http.ResponseWriter, r *http.Request, status int, 
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	}
 	addVaryHeader(w, "Accept-Encoding")
+}
+
+func isSafeStreamAssetRequest(r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	return isImmutableAssetPath(r.URL.Path) && !requiresBrowserCompatibility(r.URL.Path)
 }
 
 func requiresBrowserCompatibility(path string) bool {

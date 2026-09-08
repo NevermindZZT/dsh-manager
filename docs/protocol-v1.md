@@ -92,7 +92,15 @@ manager Dashboard 为当前浏览器设置实例 Cookie 后，会将普通 HTTP 
 }
 ```
 
-launcher 或 dsh-manager-plugin 使用本地或 SSH 转发后的 dsh URL 执行请求，再返回 `proxy_response`，body 使用 Base64。响应中的多个 `Set-Cookie` 必须通过可选的 `setCookies` 数组逐条返回，不能合并到普通 headers 中；这对 dsh 历史会话等需要会话 Cookie 的接口是必需的。WebSocket tunnel 使用 `proxy_ws_open`、`proxy_ws_open_result`、`proxy_ws_frame` 和 `proxy_ws_close`，帧 body 使用 Base64，FrameType 区分 text 与 binary。
+launcher 或 dsh-manager-plugin 使用本地或 SSH 转发后的 dsh URL 执行请求，再返回 `proxy_response`，body 使用 Base64。响应中的多个 `Set-Cookie` 必须通过可选的 `setCookies` 数组逐条返回，不能合并到普通 headers 中；这对 dsh 历史会话等需要会话 Cookie 的接口是必需的。
+
+### 可选的二进制流与 WebSocket 帧
+
+支持 `proxy.http-stream-v1` 的 Agent 收到 `proxy_request.streamResponse:true` 时，使用 `proxy_response_start`（JSON，含 status/headers/setCookies）、零个或多个 binary WebSocket 消息 `proxy_response_chunk_binary`，最后使用 JSON `proxy_response_end`。每个 binary 消息的 payload 是 `JSON header + \n + raw bytes`；header 至少包含 `type` 和 `requestId`。`proxy_response_end.error` 表示流失败。manager 对每个 requestId 使用固定大小队列；生产者不得假定无限缓冲，manager 会隔离并中止超出队列的慢浏览器流。
+
+支持 `proxy.binary-websocket-frame-v1` 时，`proxy_ws_open` 带 `binaryFrames:true`，双向使用 binary WebSocket 消息 `proxy_ws_frame_binary`，格式同样是 `JSON header + \n + raw frame bytes`，header 的 `frameType` 为 `text` 或 `binary`。未协商时继续使用 Base64 JSON `proxy_ws_frame`。WebSocket tunnel 仍使用 `proxy_ws_open`、`proxy_ws_open_result` 和 `proxy_ws_close`。
+
+支持 `proxy.cancel-v1` 的 Agent 可接收 manager 的 `{ "type":"proxy_cancel", "requestId":"...", "instanceId":"...", "reason":"client_disconnected" }`。当浏览器 HTTP 请求上下文结束时，manager 尽力发送该消息以取消对应上游工作；不要求确认，未协商时不会发送。
 
 ## 实例 ID
 
@@ -134,6 +142,9 @@ Supported capability names currently include:
 - `command` — lifecycle commands;
 - `proxy.http` — HTTP proxy;
 - `proxy.websocket` — WebSocket proxy;
+- `proxy.http-stream-v1` — binary, chunked HTTP proxy responses;
+- `proxy.binary-websocket-frame-v1` — raw binary envelopes for WebSocket tunnel frames;
+- `proxy.cancel-v1` — best-effort cancellation of a browser-abandoned HTTP proxy request;
 - `settings.host` — host-backed settings persistence;
 - `plugin.config` — plugin-owned settings.
 
