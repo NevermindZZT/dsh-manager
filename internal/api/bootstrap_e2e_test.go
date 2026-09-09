@@ -8,7 +8,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/NevermindZZT/dsh-manager/internal/config"
 	"github.com/NevermindZZT/dsh-manager/internal/storage"
@@ -44,6 +46,13 @@ func TestBootstrapRedirectAndCookieProxy(t *testing.T) {
 	register, _ := json.Marshal(agentMessage{Type: "register", Capabilities: []string{"proxy.http", "dsh.web.bootstrap-v1"}, Instances: []storage.Instance{{InstanceID: "local", DisplayName: "Local", Type: "plugin", State: "running", URLAvailable: true, StartupURL: "http://127.0.0.1:1/?token=secret"}}})
 	if err = agent.Write(context.Background(), websocket.MessageText, register); err != nil {
 		t.Fatal(err)
+	}
+	for attempt := 0; attempt < 100; attempt++ {
+		instances, listErr := srv.db.ListInstances()
+		if listErr == nil && len(instances) > 0 {
+			break
+		}
+		time.Sleep(time.Millisecond)
 	}
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/instances/"+enrolled.AgentID+"/local/open", nil)
 	req.Header.Set("Authorization", "Bearer admin")
@@ -87,12 +96,22 @@ func TestBootstrapRedirectAndCookieProxy(t *testing.T) {
 	if first.StatusCode != http.StatusSeeOther || first.Header.Get("Location") != open.URL {
 		t.Fatalf("redirect=%d %q want %q", first.StatusCode, first.Header.Get("Location"), open.URL)
 	}
+	wantPath := "Path=" + strings.TrimSuffix(open.URL, "/") + "/"
+	foundScopedCookie := false
+	for _, cookie := range first.Header.Values("Set-Cookie") {
+		if strings.Contains(cookie, wantPath) {
+			foundScopedCookie = true
+			break
+		}
+	}
+	if !foundScopedCookie {
+		t.Fatalf("upstream cookie was not scoped to the dsh session: %#v", first.Header.Values("Set-Cookie"))
+	}
 	if state, ok := srv.targetForSession(targetCookie.Value); !ok || state.BootstrapPending {
 		t.Fatalf("bootstrap state was not consumed: %#v", state)
 	}
 	secondReq, _ := http.NewRequest(http.MethodGet, ts.URL+open.URL, nil)
 	secondReq.AddCookie(targetCookie)
-	secondReq.AddCookie(&http.Cookie{Name: "dsh-auth-test", Value: "ok"})
 	secondDone := make(chan *http.Response, 1)
 	go func() { r, _ := client.Do(secondReq); secondDone <- r }()
 	_, raw, err = agent.Read(context.Background())
@@ -103,8 +122,8 @@ func TestBootstrapRedirectAndCookieProxy(t *testing.T) {
 	if err = json.Unmarshal(raw, &proxied); err != nil {
 		t.Fatal(err)
 	}
-	if proxied.Bootstrap || proxied.Headers["Cookie"] == "" {
-		t.Fatalf("expected clean request with cookie: %#v", proxied)
+	if proxied.Bootstrap || proxied.Headers["Cookie"] != "dsh-auth-test=ok" {
+		t.Fatalf("expected scoped upstream cookie without manager cookies: %#v", proxied)
 	}
 	response, _ = json.Marshal(agentMessage{Type: "proxy_response", RequestID: proxied.RequestID, Status: http.StatusOK, Headers: map[string]string{"Content-Type": "text/plain"}, Body: "b2s="})
 	_ = agent.Write(context.Background(), websocket.MessageText, response)
@@ -113,4 +132,29 @@ func TestBootstrapRedirectAndCookieProxy(t *testing.T) {
 		t.Fatal("clean proxy request failed")
 	}
 	second.Body.Close()
+	otherSession := "dsh-other-session"
+	srv.webTargets[otherSession] = webTarget{AgentID: enrolled.AgentID, InstanceID: "other", ExpiresAt: time.Now().Add(time.Hour), sessionID: otherSession, cookies: newProxyCookieJar()}
+	rootReq, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/session.list", nil)
+	rootReq.AddCookie(&http.Cookie{Name: "dsh-target", Value: otherSession})
+	rootReq.Header.Set("Referer", ts.URL+open.URL)
+	rootDone := make(chan *http.Response, 1)
+	go func() { r, _ := client.Do(rootReq); rootDone <- r }()
+	_, raw, err = agent.Read(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxied = proxyRequest{}
+	if err = json.Unmarshal(raw, &proxied); err != nil {
+		t.Fatal(err)
+	}
+	if proxied.InstanceID != "local" || proxied.Headers["Cookie"] != "dsh-auth-test=ok" || proxied.Path != "/api/session.list" {
+		t.Fatalf("root request was not kept on the referer target: %#v", proxied)
+	}
+	response, _ = json.Marshal(agentMessage{Type: "proxy_response", RequestID: proxied.RequestID, Status: http.StatusSeeOther, Headers: map[string]string{"Location": "/"}, Body: ""})
+	_ = agent.Write(context.Background(), websocket.MessageText, response)
+	root := <-rootDone
+	if root == nil || root.StatusCode != http.StatusSeeOther || root.Header.Get("Location") != open.URL {
+		t.Fatalf("root redirect=%v location=%q want %q", root, root.Header.Get("Location"), open.URL)
+	}
+	root.Body.Close()
 }

@@ -22,7 +22,7 @@
   function showApp(username, managerVersion) { $("loginView").classList.add("hidden"); $("appView").classList.remove("hidden"); $("welcome").textContent = "已登录：" + username; if (managerVersion) $("version").textContent = "v" + managerVersion; }
   function showLogin() { $("appView").classList.add("hidden"); $("loginView").classList.remove("hidden"); }
   function esc(value) { return String(value || "").replace(/[&<>]/g, function (c) { return {"&":"&amp;","<":"&lt;",">":"&gt;"}[c]; }); }
-  function escAttr(value) { return String(value || "").replace(/[^a-zA-Z0-9_.:-]/g, "_"); }
+  function escAttr(value) { return String(value || "").replace(/[&<>"']/g, function (c) { return {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]; }); }
   async function login(event) {
     event.preventDefault();
     $("loginError").textContent = "登录中…";

@@ -100,9 +100,9 @@ $env:DSH_MANAGER_NAME = "plugin-dsh"
 2. manager Dashboard 点击「打开 dsh」；
 3. 首个根请求通过 Agent 使用 startup token；
 4. dsh 返回的 303 `Location: /` 被改写回 `/dsh/<session>/`；
-5. 浏览器收到 dsh Set-Cookie；
-6. 后续 HTTP 请求不再 bootstrap，但携带 Cookie；
-7. dsh WebSocket 请求携带同一 Cookie 并保持实时通信；
+5. 浏览器收到按 `/dsh/<session>/` 隔离后的 dsh Set-Cookie；
+6. 后续 HTTP 请求不再 bootstrap，manager 从对应实例 Cookie jar 重放 Cookie；
+7. dsh WebSocket 请求携带同一实例 Cookie，且不携带 manager 的 `dsh-session` / `dsh-target` Cookie；
 8. launcher/plugin 日志和 manager 数据库中都不应出现 startup token。
 
 ## 7. Docker 测试
@@ -134,6 +134,10 @@ launcher 保存了旧 manager 的 Agent ID/Token。只有 manager 数据库被�
 ### Agent 离线
 
 检查 manager HTTP 地址、单端口防火墙、launcher/plugin 进程和日志中的 `agent connected`。
+
+### 打开 dsh 后显示“dsh 实例未运行”
+
+manager 只允许打开当前 Agent heartbeat 中仍存在、状态为 `running` 且 `urlAvailable=true` 的实例。若 Launcher 刚重建了本地或 SSH 连接，旧实例记录会在下一次 heartbeat 中被清理；刷新 Dashboard 后再打开。若仍失败，检查 Launcher 日志中的 `CurrentUrl`、SSH 隧道状态和 `[Manager]` 代理错误。
 
 ### Dashboard 仍显示 TLS fingerprint
 

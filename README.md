@@ -163,7 +163,7 @@ manager、launcher 和 plugin 的 bootstrap 约定如下：
 3. `/dsh/<session>/` 的首个无 query `GET /` 才会下发 `bootstrap:true`；
 4. Agent 使用自己内存中的 startup URL 请求本地 dsh；
 5. dsh 返回的 `Location: /` 会被 manager 改写回 `/dsh/<session>/`；
-6. dsh 的 Set-Cookie 和浏览器后续 Cookie 会继续通过 HTTP/WS tunnel 转发；
+6. dsh 的 Set-Cookie 会逐条通过 HTTP tunnel 返回，但 manager 会将上游 Cookie 的 Path 隔离到 `/dsh/<session>/`，并为每个实例维护带 Path/过期时间的 Cookie jar；后续 HTTP/WS 请求从对应实例 jar 重放 Cookie，同时不会向 dsh 转发 manager 自身的 `dsh-session` / `dsh-target` Cookie；
 7. startup URL 不写入 SQLite、Dashboard API、持久化配置或日志。
 
 ## dsh UI 代理
@@ -174,7 +174,7 @@ manager、launcher 和 plugin 的 bootstrap 约定如下：
 /dsh/<session-id>/
 ```
 
-manager 代理 HTML、静态资源、REST API、上传下载和 WebSocket。目标 dsh 的 Cookie 在 Agent HTTP 与 WebSocket 请求中保持可用。
+manager 代理 HTML、静态资源、REST API、上传下载和 WebSocket。目标 dsh 的 Cookie 值与属性会继续保留，但 Path 会按实例会话隔离；root-relative HTTP/WS 请求由实例会话上下文选择目标并重放对应 jar。
 
 ## 远程访问传输优化
 

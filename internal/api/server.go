@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -63,6 +64,8 @@ type webTarget struct {
 	InstanceID       string
 	ExpiresAt        time.Time
 	BootstrapPending bool
+	sessionID        string
+	cookies          *proxyCookieJar
 }
 
 type agentSession struct {
@@ -820,11 +823,19 @@ type proxyRequest struct {
 	StreamRequest  bool              `json:"streamRequest,omitempty"`
 }
 
+func decodeRouteValue(value string) string {
+	if decoded, err := url.PathUnescape(value); err == nil {
+		return decoded
+	}
+	return value
+}
+
 func (s *Server) openInstance(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeAdmin(w, r) {
 		return
 	}
-	agentID, instanceID := r.PathValue("agentId"), r.PathValue("instanceId")
+	agentID := decodeRouteValue(r.PathValue("agentId"))
+	instanceID := decodeRouteValue(r.PathValue("instanceId"))
 	s.sessionsMu.RLock()
 	online := s.sessions[agentID] != nil
 	s.sessionsMu.RUnlock()
@@ -832,22 +843,54 @@ func (s *Server) openInstance(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "agent is offline")
 		return
 	}
+	instances, err := s.db.ListInstances()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "list instances failed")
+		return
+	}
+	var current *storage.Instance
+	for i := range instances {
+		if instances[i].AgentID == agentID && instances[i].InstanceID == instanceID {
+			current = &instances[i]
+			break
+		}
+	}
+	if current == nil {
+		available := make([]string, 0)
+		for _, item := range instances {
+			if item.AgentID == agentID {
+				available = append(available, item.InstanceID)
+			}
+		}
+		s.logger.Warn("open instance missing from current heartbeat", "agentId", agentID, "instanceId", instanceID, "availableInstances", available)
+		writeError(w, http.StatusConflict, "instance is not present in the current agent heartbeat")
+		return
+	}
+	if !current.URLAvailable || !strings.EqualFold(current.State, "running") {
+		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "error": "dsh instance is not ready", "state": current.State, "urlAvailable": current.URLAvailable})
+		return
+	}
 	bootstrapPending := s.startupAvailable(agentID, instanceID)
 	sessionID := "dsh-" + randomHex(16)
 	s.webTargetsMu.Lock()
-	s.webTargets[sessionID] = webTarget{AgentID: agentID, InstanceID: instanceID, ExpiresAt: time.Now().Add(time.Hour), BootstrapPending: bootstrapPending}
+	s.webTargets[sessionID] = webTarget{AgentID: agentID, InstanceID: instanceID, ExpiresAt: time.Now().Add(time.Hour), BootstrapPending: bootstrapPending, sessionID: sessionID, cookies: newProxyCookieJar()}
 	s.webTargetsMu.Unlock()
 	http.SetCookie(w, &http.Cookie{Name: "dsh-target", Value: sessionID, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: 3600})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "url": "/dsh/" + sessionID + "/"})
 }
 
 func (s *Server) targetForSession(sessionID string) (webTarget, bool) {
-	s.webTargetsMu.RLock()
+	s.webTargetsMu.Lock()
+	defer s.webTargetsMu.Unlock()
 	target, ok := s.webTargets[sessionID]
-	s.webTargetsMu.RUnlock()
 	if !ok || time.Now().After(target.ExpiresAt) {
 		return webTarget{}, false
 	}
+	target.sessionID = sessionID
+	if target.cookies == nil {
+		target.cookies = newProxyCookieJar()
+	}
+	s.webTargets[sessionID] = target
 	return target, true
 }
 
@@ -872,7 +915,8 @@ func (s *Server) proxySession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.SetCookie(w, &http.Cookie{Name: "dsh-target", Value: sessionID, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: 3600})
-	copyReq := r.Clone(r.Context())
+	copyReq := withTargetSession(r.Clone(r.Context()), sessionID)
+	copyReq.Header.Set("Cookie", withTargetCookie(copyReq.Header.Get("Cookie"), sessionID))
 	prefix := "/dsh/" + sessionID
 	path := strings.TrimPrefix(r.URL.Path, prefix)
 	if path == "" || path == "/" {
@@ -906,15 +950,11 @@ func (s *Server) proxyOrNot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "manager API endpoint not found: "+r.Method+" "+r.URL.Path)
 		return
 	}
-	if r.URL.Path == "/" {
+	if r.URL.Path == "/" && sessionIDFromReferer(r) == "" {
 		s.dashboard(w, r)
 		return
 	}
-	if _, err := r.Cookie("dsh-target"); err != nil {
-		if r.URL.Path == "/" {
-			s.dashboard(w, r)
-			return
-		}
+	if sessionIDForRequest(r) == "" {
 		http.NotFound(w, r)
 		return
 	}
@@ -926,12 +966,12 @@ func (s *Server) proxyOrNot(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) proxyWebSocket(w http.ResponseWriter, r *http.Request) {
-	cookie, err := r.Cookie("dsh-target")
-	if err != nil {
+	sessionID := sessionIDForRequest(r)
+	if sessionID == "" {
 		http.NotFound(w, r)
 		return
 	}
-	target, ok := s.targetForSession(cookie.Value)
+	target, ok := s.targetForSession(sessionID)
 	if !ok {
 		clearTargetCookie(w)
 		s.dashboard(w, r)
@@ -963,7 +1003,15 @@ func (s *Server) proxyWebSocket(w http.ResponseWriter, r *http.Request) {
 	s.tunnelMu.Unlock()
 	defer func() { s.tunnelMu.Lock(); delete(s.tunnels, requestID); s.tunnelMu.Unlock() }()
 	binaryFrames := supportsCapability(session, "proxy.binary-websocket-frame-v1")
-	open := map[string]any{"type": "proxy_ws_open", "requestId": requestID, "instanceId": instanceID, "path": r.URL.RequestURI(), "headers": map[string]string{"Cookie": r.Header.Get("Cookie")}, "binaryFrames": binaryFrames}
+	cookieJar := target.cookies
+	if cookieJar == nil {
+		cookieJar = newProxyCookieJar()
+	}
+	forwardHeaders := map[string]string{}
+	if cookieHeader := cookieJar.requestHeader(r.URL.Path, r.Header.Get("Cookie")); cookieHeader != "" {
+		forwardHeaders["Cookie"] = cookieHeader
+	}
+	open := map[string]any{"type": "proxy_ws_open", "requestId": requestID, "instanceId": instanceID, "path": r.URL.RequestURI(), "headers": forwardHeaders, "binaryFrames": binaryFrames}
 	if err := s.writeAgentJSON(r.Context(), session, open); err != nil {
 		return
 	}
@@ -1042,18 +1090,18 @@ func frameType(t websocket.MessageType) string {
 }
 
 func (s *Server) proxyHTTP(w http.ResponseWriter, r *http.Request) {
-	cookie, err := r.Cookie("dsh-target")
-	if err != nil {
+	sessionID := sessionIDForRequest(r)
+	if sessionID == "" {
 		http.NotFound(w, r)
 		return
 	}
-	target, ok := s.targetForSession(cookie.Value)
+	target, ok := s.targetForSession(sessionID)
 	if !ok {
 		clearTargetCookie(w)
 		s.dashboard(w, r)
 		return
 	}
-	s.proxyHTTPForTarget(w, r, target, "", false)
+	s.proxyHTTPForTarget(w, r, target, sessionID, false)
 }
 
 func (s *Server) sendProxyRequest(ctx context.Context, session *agentSession, request proxyRequest, body io.Reader, stream bool) error {
@@ -1131,9 +1179,17 @@ func (s *Server) proxyHTTPForTarget(w http.ResponseWriter, r *http.Request, targ
 	requestID := "proxy-" + randomHex(12)
 	headers := map[string]string{}
 	for k, v := range r.Header {
-		if len(v) > 0 && !isHopHeader(k) {
-			headers[k] = v[0]
+		if strings.EqualFold(k, "Cookie") || len(v) == 0 || isHopHeader(k) {
+			continue
 		}
+		headers[k] = v[0]
+	}
+	cookieJar := target.cookies
+	if cookieJar == nil {
+		cookieJar = newProxyCookieJar()
+	}
+	if cookieHeader := cookieJar.requestHeader(r.URL.Path, r.Header.Get("Cookie")); cookieHeader != "" {
+		headers["Cookie"] = cookieHeader
 	}
 	if requiresBrowserCompatibility(r.URL.Path) {
 		headers["Accept-Encoding"] = "identity"
@@ -1175,10 +1231,14 @@ func (s *Server) proxyHTTPForTarget(w http.ResponseWriter, r *http.Request, targ
 		http.Error(w, response.Error, http.StatusBadGateway)
 		return
 	}
-	if sessionID != "" {
+	locationSessionID := sessionID
+	if locationSessionID == "" {
+		locationSessionID = target.sessionID
+	}
+	if locationSessionID != "" {
 		for name, value := range response.Headers {
 			if strings.EqualFold(name, "Location") && strings.HasPrefix(value, "/") && !strings.HasPrefix(value, "//") {
-				response.Headers[name] = "/dsh/" + sessionID + value
+				response.Headers[name] = "/dsh/" + locationSessionID + value
 			}
 		}
 	}
@@ -1191,8 +1251,15 @@ func (s *Server) proxyHTTPForTarget(w http.ResponseWriter, r *http.Request, targ
 			w.Header().Set(k, v)
 		}
 	}
+	cookieJar.apply(response.SetCookies, r.URL.Path)
+	cookieScopeID := target.sessionID
+	if cookieScopeID == "" {
+		cookieScopeID = sessionID
+	}
 	for _, cookie := range response.SetCookies {
-		w.Header().Add("Set-Cookie", cookie)
+		if scoped := scopeProxySetCookie(cookie, cookieScopeID, r.URL.Path); scoped != "" {
+			w.Header().Add("Set-Cookie", scoped)
+		}
 	}
 	applyProxyCacheHeaders(w, r, status, len(response.SetCookies) > 0)
 	if streamResponse {

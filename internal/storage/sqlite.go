@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -244,10 +245,24 @@ func (db *DB) UpsertHeartbeat(agentID string, input []Instance) error {
 	if _, err = tx.Exec(`UPDATE agents SET last_seen_at=? WHERE id=?`, now, agentID); err != nil {
 		return err
 	}
+	args := make([]any, 0, len(input)+1)
+	args = append(args, agentID)
+	placeholders := make([]string, 0, len(input))
 	for _, item := range input {
 		if item.InstanceID == "" {
 			return fmt.Errorf("instanceId is required")
 		}
+		placeholders = append(placeholders, "?")
+		args = append(args, item.InstanceID)
+	}
+	deleteSQL := `DELETE FROM instances WHERE agent_id=?`
+	if len(placeholders) > 0 {
+		deleteSQL += ` AND instance_id NOT IN (` + strings.Join(placeholders, ",") + `)`
+	}
+	if _, err = tx.Exec(deleteSQL, args...); err != nil {
+		return err
+	}
+	for _, item := range input {
 		_, err = tx.Exec(`INSERT INTO instances(agent_id,instance_id,display_name,type,state,url_available,version,generation,event_seq,error,last_seen_at)
 VALUES(?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(agent_id,instance_id) DO UPDATE SET display_name=excluded.display_name,type=excluded.type,state=excluded.state,url_available=excluded.url_available,version=excluded.version,generation=excluded.generation,event_seq=excluded.event_seq,error=excluded.error,last_seen_at=excluded.last_seen_at`, agentID, item.InstanceID, item.DisplayName, item.Type, item.State, boolInt(item.URLAvailable), item.Version, item.Generation, item.EventSeq, item.Error, now)

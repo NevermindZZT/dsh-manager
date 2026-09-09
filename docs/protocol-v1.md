@@ -92,7 +92,7 @@ manager Dashboard 为当前浏览器设置实例 Cookie 后，会将普通 HTTP 
 }
 ```
 
-launcher 或 dsh-manager-plugin 使用本地或 SSH 转发后的 dsh URL 执行请求，再返回 `proxy_response`，body 使用 Base64。响应中的多个 `Set-Cookie` 必须通过可选的 `setCookies` 数组逐条返回，不能合并到普通 headers 中；这对 dsh 历史会话等需要会话 Cookie 的接口是必需的。
+launcher 或 dsh-manager-plugin 使用本地或 SSH 转发后的 dsh URL 执行请求，再返回 `proxy_response`，body 使用 Base64。响应中的多个 `Set-Cookie` 必须通过可选的 `setCookies` 数组逐条返回，不能合并到普通 headers 中；这对 dsh 历史会话等需要会话 Cookie 的接口是必需的。manager 会在浏览器边界按 `/dsh/<session>/` 隔离 Cookie Path，并在对应实例的 HTTP/WS 请求中重放 Cookie；Cookie 值和其他属性保持不变，但 `dsh-session` / `dsh-target` 等 manager Cookie 不会转发给 Agent。
 
 ### 可选的二进制流与 WebSocket 帧
 
