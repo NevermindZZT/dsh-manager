@@ -1,6 +1,6 @@
 # dsh-manager
 
-![Version](https://img.shields.io/badge/version-v0.3.2-blue)
+![Version](https://img.shields.io/badge/version-v0.3.3-blue)
 ![Go](https://img.shields.io/badge/Go-1.26-00ADD8)
 ![Docker](https://img.shields.io/badge/Docker-Hub-2496ED)
 ![License](https://img.shields.io/badge/license-MIT-green)
