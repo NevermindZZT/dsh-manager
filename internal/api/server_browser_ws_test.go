@@ -141,4 +141,40 @@ func TestBrowserWebSocketTunnelRelaysFrames(t *testing.T) {
 	if err := agent.Write(context.Background(), websocket.MessageText, explicitAck); err != nil {
 		t.Fatal(err)
 	}
+	rejectedBrowser, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(ts.URL, "http")+"/dsh/"+sessionID+"/rejected", &websocket.DialOptions{HTTPClient: client, HTTPHeader: browserHeaders})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rejectedBrowser.CloseNow()
+	_, rejectedOpenData, err := agent.Read(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rejectedOpen map[string]any
+	if err := json.Unmarshal(rejectedOpenData, &rejectedOpen); err != nil {
+		t.Fatal(err)
+	}
+	rejectedRequestID := rejectedOpen["requestId"].(string)
+	rejectedOK := false
+	rejectedAck, _ := json.Marshal(agentMessage{Type: "proxy_ws_open_result", RequestID: rejectedRequestID, OK: &rejectedOK, Error: "local dsh refused"})
+	if err := agent.Write(context.Background(), websocket.MessageText, rejectedAck); err != nil {
+		t.Fatal(err)
+	}
+	_, _, closeErr := rejectedBrowser.Read(context.Background())
+	if websocket.CloseStatus(closeErr) != websocket.StatusInternalError {
+		t.Fatalf("rejected WebSocket close=%v, want %v", websocket.CloseStatus(closeErr), websocket.StatusInternalError)
+	}
+	deadline := time.Now().Add(time.Second)
+	for (srv.proxyStats.wsOpenSent.Load() < 4 || srv.proxyStats.wsOpenAcked.Load() < 3 || srv.proxyStats.wsOpenFailed.Load() < 1) && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := srv.proxyStats.wsOpenSent.Load(); got != 4 {
+		t.Fatalf("WebSocket open sent=%d, want 4", got)
+	}
+	if got := srv.proxyStats.wsOpenAcked.Load(); got != 3 {
+		t.Fatalf("WebSocket open acked=%d, want 3", got)
+	}
+	if got := srv.proxyStats.wsOpenFailed.Load(); got != 1 {
+		t.Fatalf("WebSocket open failed=%d, want 1", got)
+	}
 }

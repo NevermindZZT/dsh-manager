@@ -29,14 +29,16 @@ import (
 )
 
 const (
-	agentMessageReadLimit = 64 << 20
-	proxyHTTPTimeout      = 5 * time.Minute
-	proxyWebSocketTimeout = 45 * time.Second
-	proxyChunkSize        = 64 << 10
-	proxyRequestMaxBytes  = 16 << 20
-	proxyStreamQueue      = 8
-	tunnelQueue           = 32
-	proxyHTTPMaxInFlight  = 16
+	agentMessageReadLimit          = 64 << 20
+	proxyHTTPTimeout               = 5 * time.Minute
+	proxyWebSocketTimeout          = 45 * time.Second
+	proxyWebSocketHeartbeatEvery   = 20 * time.Second
+	proxyWebSocketHeartbeatTimeout = 5 * time.Second
+	proxyChunkSize                 = 64 << 10
+	proxyRequestMaxBytes           = 16 << 20
+	proxyStreamQueue               = 8
+	tunnelQueue                    = 32
+	proxyHTTPMaxInFlight           = 16
 )
 
 type Server struct {
@@ -84,9 +86,14 @@ type agentSession struct {
 }
 
 type proxyStats struct {
-	httpRejected   atomic.Uint64
-	streamOverflow atomic.Uint64
-	tunnelDropped  atomic.Uint64
+	httpRejected      atomic.Uint64
+	streamOverflow    atomic.Uint64
+	tunnelDropped     atomic.Uint64
+	wsOpenSent        atomic.Uint64
+	wsOpenAcked       atomic.Uint64
+	wsOpenFailed      atomic.Uint64
+	wsHeartbeatFailed atomic.Uint64
+	wsClosed          atomic.Uint64
 }
 
 func (s *agentSession) tryAcquireHTTP() bool {
@@ -292,7 +299,16 @@ func (s *Server) adminDiagnostics(w http.ResponseWriter, r *http.Request) {
 	cache := s.rewrittenJSCache.snapshot()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"time": time.Now().UTC(), "version": version.Version,
-		"proxy":    map[string]uint64{"httpRejected": s.proxyStats.httpRejected.Load(), "streamOverflow": s.proxyStats.streamOverflow.Load(), "tunnelDropped": s.proxyStats.tunnelDropped.Load()},
+		"proxy": map[string]uint64{
+			"httpRejected":      s.proxyStats.httpRejected.Load(),
+			"streamOverflow":    s.proxyStats.streamOverflow.Load(),
+			"tunnelDropped":     s.proxyStats.tunnelDropped.Load(),
+			"wsOpenSent":        s.proxyStats.wsOpenSent.Load(),
+			"wsOpenAcked":       s.proxyStats.wsOpenAcked.Load(),
+			"wsOpenFailed":      s.proxyStats.wsOpenFailed.Load(),
+			"wsHeartbeatFailed": s.proxyStats.wsHeartbeatFailed.Load(),
+			"wsClosed":          s.proxyStats.wsClosed.Load(),
+		},
 		"outbound": queues, "agents": agents,
 		"rewrittenJSCache": map[string]any{"entries": cache.Entries, "bytes": cache.Bytes, "maxBytes": cache.MaxBytes, "hits": cache.Hits, "misses": cache.Misses, "evictions": cache.Evictions},
 	})
@@ -965,6 +981,40 @@ func (s *Server) proxyOrNot(w http.ResponseWriter, r *http.Request) {
 	s.proxyHTTP(w, r)
 }
 
+func startBrowserWebSocketHeartbeat(ctx context.Context, browser *websocket.Conn, every, timeout time.Duration) <-chan error {
+	errorsCh := make(chan error, 1)
+	go func() {
+		ticker := time.NewTicker(every)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				pingCtx, cancel := context.WithTimeout(ctx, timeout)
+				err := browser.Ping(pingCtx)
+				cancel()
+				if err != nil {
+					select {
+					case errorsCh <- err:
+					default:
+					}
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return errorsCh
+}
+
+func websocketCloseReason(reason string) string {
+	const maxReasonBytes = 123
+	if len(reason) <= maxReasonBytes {
+		return reason
+	}
+	return reason[:maxReasonBytes]
+}
+
 func (s *Server) proxyWebSocket(w http.ResponseWriter, r *http.Request) {
 	sessionID := sessionIDForRequest(r)
 	if sessionID == "" {
@@ -997,6 +1047,10 @@ func (s *Server) proxyWebSocket(w http.ResponseWriter, r *http.Request) {
 	browser.SetReadLimit(32 << 20)
 	defer browser.CloseNow()
 	requestID := "ws-" + randomHex(12)
+	defer func() {
+		s.proxyStats.wsClosed.Add(1)
+		s.logger.Info("browser websocket tunnel closed", "requestId", requestID, "agentId", agentID, "instanceId", instanceID, "path", r.URL.Path)
+	}()
 	agentCh := make(chan agentMessage, tunnelQueue)
 	s.tunnelMu.Lock()
 	s.tunnels[requestID] = agentCh
@@ -1012,33 +1066,53 @@ func (s *Server) proxyWebSocket(w http.ResponseWriter, r *http.Request) {
 		forwardHeaders["Cookie"] = cookieHeader
 	}
 	open := map[string]any{"type": "proxy_ws_open", "requestId": requestID, "instanceId": instanceID, "path": r.URL.RequestURI(), "headers": forwardHeaders, "binaryFrames": binaryFrames}
+	s.proxyStats.wsOpenSent.Add(1)
 	if err := s.writeAgentJSON(r.Context(), session, open); err != nil {
+		s.proxyStats.wsOpenFailed.Add(1)
+		s.logger.Warn("browser websocket open send failed", "requestId", requestID, "agentId", agentID, "instanceId", instanceID, "path", r.URL.Path, "error", err)
+		_ = browser.Close(websocket.StatusTryAgainLater, "agent tunnel unavailable")
 		return
 	}
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
+	openTimer := time.NewTimer(proxyWebSocketTimeout)
+	defer openTimer.Stop()
 	select {
 	case msg := <-agentCh:
 		if msg.Type != "proxy_ws_open_result" || msg.OK == nil || !*msg.OK {
-			_ = browser.Close(websocket.StatusInternalError, msg.Error)
+			s.proxyStats.wsOpenFailed.Add(1)
+			reason := websocketCloseReason(msg.Error)
+			s.logger.Warn("browser websocket open rejected", "requestId", requestID, "agentId", agentID, "instanceId", instanceID, "path", r.URL.Path, "error", msg.Error)
+			_ = browser.Close(websocket.StatusInternalError, reason)
 			return
 		}
-	case <-time.After(proxyWebSocketTimeout):
+		s.proxyStats.wsOpenAcked.Add(1)
+		s.logger.Info("browser websocket tunnel opened", "requestId", requestID, "agentId", agentID, "instanceId", instanceID, "path", r.URL.Path)
+	case <-openTimer.C:
+		s.proxyStats.wsOpenFailed.Add(1)
+		s.logger.Warn("browser websocket open timed out", "requestId", requestID, "agentId", agentID, "instanceId", instanceID, "path", r.URL.Path, "timeout", proxyWebSocketTimeout.String())
 		_ = browser.Close(websocket.StatusTryAgainLater, "tunnel open timeout")
 		return
 	}
+	heartbeatErrors := startBrowserWebSocketHeartbeat(ctx, browser, proxyWebSocketHeartbeatEvery, proxyWebSocketHeartbeatTimeout)
 	frames := make(chan agentMessage, 1)
+	sendFrame := func(frame agentMessage) {
+		select {
+		case frames <- frame:
+		case <-ctx.Done():
+		}
+	}
 	go func() {
 		for {
 			typ, data, readErr := browser.Read(ctx)
 			if readErr != nil {
-				frames <- agentMessage{Type: "proxy_ws_close", RequestID: requestID, Error: readErr.Error()}
+				sendFrame(agentMessage{Type: "proxy_ws_close", RequestID: requestID, Error: readErr.Error()})
 				return
 			}
 			if binaryFrames {
-				frames <- agentMessage{Type: "proxy_ws_frame_binary", RequestID: requestID, FrameType: frameType(typ), BodyBytes: data}
+				sendFrame(agentMessage{Type: "proxy_ws_frame_binary", RequestID: requestID, FrameType: frameType(typ), BodyBytes: data})
 			} else {
-				frames <- agentMessage{Type: "proxy_ws_frame", RequestID: requestID, FrameType: frameType(typ), Body: base64.StdEncoding.EncodeToString(data)}
+				sendFrame(agentMessage{Type: "proxy_ws_frame", RequestID: requestID, FrameType: frameType(typ), Body: base64.StdEncoding.EncodeToString(data)})
 			}
 		}
 	}()
@@ -1063,20 +1137,36 @@ func (s *Server) proxyWebSocket(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			case "proxy_ws_close":
-				_ = browser.Close(websocket.StatusNormalClosure, msg.Error)
+				_ = browser.Close(websocket.StatusNormalClosure, websocketCloseReason(msg.Error))
 				return
 			}
 		case frame := <-frames:
 			if frame.Type == "proxy_ws_frame_binary" {
-				_ = writeAgentBinary(ctx, session, frame, frame.BodyBytes)
+				if err := writeAgentBinary(ctx, session, frame, frame.BodyBytes); err != nil {
+					s.logger.Warn("browser websocket binary frame send failed", "requestId", requestID, "agentId", agentID, "instanceId", instanceID, "error", err)
+					return
+				}
 			} else if frame.Type == "proxy_ws_close" {
-				_ = s.writeAgentJSONPriority(ctx, session, frame, outboundCritical)
+				if err := s.writeAgentJSONPriority(ctx, session, frame, outboundCritical); err != nil {
+					s.logger.Warn("browser websocket close send failed", "requestId", requestID, "agentId", agentID, "instanceId", instanceID, "error", err)
+				}
 			} else {
-				_ = s.writeAgentJSON(ctx, session, frame)
+				if err := s.writeAgentJSON(ctx, session, frame); err != nil {
+					s.logger.Warn("browser websocket frame send failed", "requestId", requestID, "agentId", agentID, "instanceId", instanceID, "error", err)
+					return
+				}
 			}
 			if frame.Type == "proxy_ws_close" {
 				return
 			}
+		case err := <-heartbeatErrors:
+			s.proxyStats.wsHeartbeatFailed.Add(1)
+			s.logger.Warn("browser websocket heartbeat failed", "requestId", requestID, "agentId", agentID, "instanceId", instanceID, "path", r.URL.Path, "error", err)
+			closeCtx, closeCancel := context.WithTimeout(context.Background(), 2*time.Second)
+			_ = s.writeAgentJSONPriority(closeCtx, session, agentMessage{Type: "proxy_ws_close", RequestID: requestID, Error: "browser websocket heartbeat failed"}, outboundCritical)
+			closeCancel()
+			_ = browser.Close(websocket.StatusTryAgainLater, "browser heartbeat failed")
+			return
 		case <-ctx.Done():
 			return
 		}

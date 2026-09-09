@@ -100,6 +100,8 @@ launcher 或 dsh-manager-plugin 使用本地或 SSH 转发后的 dsh URL 执行�
 
 支持 `proxy.binary-websocket-frame-v1` 时，`proxy_ws_open` 带 `binaryFrames:true`，双向使用 binary WebSocket 消息 `proxy_ws_frame_binary`，格式同样是 `JSON header + \n + raw frame bytes`，header 的 `frameType` 为 `text` 或 `binary`。未协商时继续使用 Base64 JSON `proxy_ws_frame`。WebSocket tunnel 仍使用 `proxy_ws_open`、`proxy_ws_open_result` 和 `proxy_ws_close`。
 
+浏览器到 manager 的 dsh WebSocket 是 manager 内部传输，不改变 Agent Protocol v1 的消息格式。manager 在收到 `proxy_ws_open_result` 后默认每 20 秒发送一次 WebSocket Ping，5 秒内收不到 Pong 时会主动发送 `proxy_ws_close` 并结束浏览器 tunnel；该 heartbeat 用于兼容 Cloudflare Tunnel 等具有空闲连接回收策略的反向代理。
+
 支持 `proxy.cancel-v1` 的 Agent 可接收 manager 的 `{ "type":"proxy_cancel", "requestId":"...", "instanceId":"...", "reason":"client_disconnected" }`。当浏览器 HTTP 请求上下文结束时，manager 尽力发送该消息以取消对应上游工作；不要求确认，未协商时不会发送。
 
 支持 `proxy.http-request-stream-v1` 时，manager 以 JSON `proxy_request_start` 发送请求元数据，以一个或多个 binary `proxy_request_chunk_binary` 发送不大于 64 KiB 的原始请求体块，最后以 JSON `proxy_request_end` 收尾。binary envelope 为 `JSON header + \n + raw bytes`，header 含 `type`、`requestId`、`instanceId`。未协商时继续使用 Base64 `proxy_request.body`。

@@ -102,6 +102,10 @@ ingress:
 cloudflared tunnel ingress validate
 ```
 
+manager 会对每条浏览器 dsh WebSocket 在打开成功后发送 20 秒一次的 Ping，并在 5 秒内收不到 Pong 时主动结束 tunnel。这样可以避免 Cloudflare Tunnel 在 dsh 启动阶段暂时没有业务帧时回收连接。Cloudflare 控制台中的 WebSockets 开关仍必须启用。
+
+如果出现 dsh 一直停留在 `Loading plugins…`，先查询管理员诊断接口中的 `proxy.wsOpenSent`、`proxy.wsOpenAcked`、`proxy.wsOpenFailed` 和 `proxy.wsHeartbeatFailed`，再结合 manager 日志中的 `browser websocket tunnel opened`、`browser websocket open timed out` 或 `browser websocket heartbeat failed` 判断卡在哪一段。
+
 使用域名之前确认：
 
 ```text

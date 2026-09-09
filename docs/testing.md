@@ -125,6 +125,8 @@ ingress:
   - service: http_status:404
 ```
 
+浏览器 dsh WebSocket 打开成功后，manager 默认每 20 秒发送一次 Ping，并等待最多 5 秒的 Pong。复现 Loading 卡住问题时，查看 `/api/v1/admin/diagnostics` 的 `proxy.wsOpenSent`、`proxy.wsOpenAcked`、`proxy.wsOpenFailed`、`proxy.wsHeartbeatFailed`，同时查看 `cloudflared tunnel logs` 和 manager 日志。
+
 ## 8. 常见连接失败
 
 ### invalid agent credentials
@@ -134,6 +136,17 @@ launcher 保存了旧 manager 的 Agent ID/Token。只有 manager 数据库被�
 ### Agent 离线
 
 检查 manager HTTP 地址、单端口防火墙、launcher/plugin 进程和日志中的 `agent connected`。
+
+### 打开 dsh 后显示 `Loading plugins…`
+
+先查看 `/api/v1/admin/diagnostics`：
+
+- `wsOpenSent` 增长但 `wsOpenAcked` 不增长：manager 已收到浏览器 WebSocket，但 Agent/plugin 没有完成本地 dsh WebSocket；
+- `wsOpenFailed` 增长：Agent tunnel 发送失败、Agent 重连或本地 dsh open 超时；
+- `wsHeartbeatFailed` 增长：浏览器到 Cloudflare/manager 的长连接没有及时返回 Pong；
+- 所有 WebSocket 指标正常但仍 Loading：继续查看 dsh 前端控制台和 `/api/remote.mux` 的消息，问题可能在 DSH 插件激活或远程事件流。
+
+确认 Cloudflare WebSockets 已开启，并查看 `cloudflared tunnel logs`。修改 ingress 后执行 `cloudflared tunnel ingress validate`，再重启 cloudflared 和 manager。
 
 ### 打开 dsh 后显示“dsh 实例未运行”
 
