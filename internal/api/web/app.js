@@ -21,8 +21,62 @@
   }
   function showApp(username, managerVersion) { $("loginView").classList.add("hidden"); $("appView").classList.remove("hidden"); $("welcome").textContent = "已登录：" + username; if (managerVersion) $("version").textContent = "v" + managerVersion; }
   function showLogin() { $("appView").classList.add("hidden"); $("loginView").classList.remove("hidden"); }
-  function esc(value) { return String(value || "").replace(/[&<>]/g, function (c) { return {"&":"&amp;","<":"&lt;",">":"&gt;"}[c]; }); }
-  function escAttr(value) { return String(value || "").replace(/[&<>"']/g, function (c) { return {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]; }); }
+  function esc(value) { return String(value == null ? "" : value).replace(/[&<>]/g, function (c) { return {"&":"&amp;","<":"&lt;",">":"&gt;"}[c]; }); }
+  function escAttr(value) { return String(value == null ? "" : value).replace(/[&<>"']/g, function (c) { return {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]; }); }
+  function numberValue(value) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : 0;
+  }
+  function formatTime(value) {
+    if (!value) return "";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+    return date.toLocaleString("zh-CN", { hour12: false });
+  }
+  function metric(label, value, warning) {
+    return '<div class="diagnostic-metric"><span>' + esc(label) + '</span><b' + (warning ? ' class="warn"' : '') + '>' + esc(value) + '</b></div>';
+  }
+  function diagnosticsMarkup(info) {
+    const data = info || {};
+    const proxy = data.proxy || {};
+    const outbound = data.outbound || {};
+    const agents = Array.isArray(data.agents) ? data.agents : [];
+    const activeHTTP = agents.reduce(function (sum, agent) { return sum + numberValue(agent.activeHTTP); }, 0);
+    const queued = numberValue(outbound.critical) + numberValue(outbound.interactive) + numberValue(outbound.bulk);
+    const time = formatTime(data.time);
+    const agentMarkup = agents.length ? agents.map(function (agent) {
+      const queue = numberValue(agent.criticalQueue) + numberValue(agent.interactiveQueue) + numberValue(agent.bulkQueue);
+      return '<div class="diagnostic-agent"><div class="diagnostic-agent-header"><code>' + esc(agent.agentId || "未知 Agent") + '</code><span class="pill online">在线</span></div><div class="diagnostic-agent-meta"><span>活跃 HTTP：' + esc(agent.activeHTTP) + '</span><span>队列：' + esc(queue) + '</span><span>关键队列：' + esc(agent.criticalQueue) + '</span></div></div>';
+    }).join("") : '<div class="diagnostics-empty">暂无在线 Agent</div>';
+    return '<div class="diagnostics-meta"><span><span class="status-dot online"></span> 已连接 Agent <strong>' + esc(agents.length) + '</strong></span><span>活跃 HTTP <strong>' + esc(activeHTTP) + '</strong></span><span>待处理队列 <strong>' + esc(queued) + '</strong></span></div>'
+      + '<div class="diagnostics-section"><span class="diagnostics-section-title">代理转发</span><div class="diagnostic-grid">'
+      + metric("HTTP 拒绝", proxy.httpRejected, numberValue(proxy.httpRejected) > 0)
+      + metric("流队列溢出", proxy.streamOverflow, numberValue(proxy.streamOverflow) > 0)
+      + metric("Tunnel 丢弃", proxy.tunnelDropped, numberValue(proxy.tunnelDropped) > 0)
+      + metric("WS 心跳失败", proxy.wsHeartbeatFailed, numberValue(proxy.wsHeartbeatFailed) > 0)
+      + metric("写入错误", outbound.writeErrors, numberValue(outbound.writeErrors) > 0)
+      + '</div></div>'
+      + '<div class="diagnostics-section"><span class="diagnostics-section-title">WebSocket 生命周期</span><div class="diagnostic-grid">'
+      + metric("打开请求", proxy.wsOpenSent)
+      + metric("打开成功", proxy.wsOpenAcked)
+      + metric("打开失败", proxy.wsOpenFailed, numberValue(proxy.wsOpenFailed) > 0)
+      + metric("已关闭", proxy.wsClosed)
+      + '</div></div>'
+      + '<div class="diagnostics-section"><span class="diagnostics-section-title">在线 Agent</span><div class="diagnostic-agents">' + agentMarkup + '</div></div>'
+      + '<div class="diagnostics-footer">' + (time ? "更新于 " + esc(time) : "已更新") + '</div>';
+  }
+  function renderDiagnostics(info) {
+    $("diagnostics").className = "instance diagnostics-panel";
+    $("diagnostics").innerHTML = diagnosticsMarkup(info);
+  }
+  function renderDiagnosticsError(error) {
+    $("diagnostics").className = "instance diagnostics-panel diagnostics-error";
+    $("diagnostics").innerHTML = '<strong>诊断暂不可用</strong><span>' + esc(error && error.message ? error.message : "请求失败") + '</span><small>可点击右上角“刷新”重试</small>';
+  }
+  function renderDiagnosticsLoading() {
+    $("diagnostics").className = "instance diagnostics-panel diagnostics-loading";
+    $("diagnostics").textContent = "加载中…";
+  }
   async function login(event) {
     event.preventDefault();
     $("loginError").textContent = "登录中…";
@@ -64,16 +118,27 @@
     }
   }
   async function loadData() {
+    renderDiagnosticsLoading();
     try {
-      const values = await Promise.all([api("/api/v1/agents"), api("/api/v1/instances"), loadPairing(), api("/api/v1/admin/diagnostics")]);
-      const agents = values[0].agents || [], instances = values[1].instances || [], diagnostics = values[3] || {};
+      const results = await Promise.allSettled([api("/api/v1/agents"), api("/api/v1/instances"), loadPairing(), api("/api/v1/admin/diagnostics")]);
+      const diagnosticsResult = results[3];
+      if (diagnosticsResult.status === "fulfilled") renderDiagnostics(diagnosticsResult.value || {});
+      else renderDiagnosticsError(diagnosticsResult.reason);
+      const firstError = results.slice(0, 3).find(function (result) { return result.status === "rejected"; });
+      if (firstError) throw firstError.reason;
+      const agents = (results[0].value || {}).agents || [], instances = (results[1].value || {}).instances || [];
       $("agentCount").textContent = agents.filter(function (x) { return x.online; }).length;
       $("instanceCount").textContent = instances.length;
       $("runningCount").textContent = instances.filter(function (x) { return x.state === "running"; }).length;
       $("agents").innerHTML = agents.length ? agents.map(function (x) { var id = x.id || x.agentId || ""; return '<div class="instance"><div class="instance-head"><h3>' + esc(x.name) + '</h3><span class="pill ' + (x.online ? 'online' : 'offline') + '">' + (x.online ? '在线' : '离线') + '</span></div><code>' + esc(id) + '</code><span class="muted">' + esc(x.platform) + ' · ' + esc(x.agentType || 'launcher') + ' · ' + esc(x.launcherVersion || x.pluginVersion || '') + '</span><div class=actions><button class=danger data-action=revoke data-agent="' + escAttr(id) + '">取消配对</button></div></div>'; }).join("") : '<span class="muted">暂无 Agent</span>';
       $("instances").innerHTML = instances.length ? instances.map(function (x) { return '<div class="instance"><div class="instance-head"><h3>' + esc(x.displayName) + '</h3><span class="pill ' + escAttr(x.state) + '">' + esc(x.state) + '</span></div><div class=muted>电脑：' + esc(x.agentName || x.agentId) + '</div><code>' + esc(x.agentId + '/' + x.instanceId) + '</code><span class="muted">' + (x.urlAvailable ? '服务地址可用' : '服务未就绪') + '</span><div class="actions"><button data-action="start" data-agent="' + escAttr(x.agentId) + '" data-instance="' + escAttr(x.instanceId) + '">启动</button><button class="danger" data-action="stop" data-agent="' + escAttr(x.agentId) + '" data-instance="' + escAttr(x.instanceId) + '">停止</button><button data-action="restart" data-agent="' + escAttr(x.agentId) + '" data-instance="' + escAttr(x.instanceId) + '">重启</button><button class="secondary" data-action="open" data-agent="' + escAttr(x.agentId) + '" data-instance="' + escAttr(x.instanceId) + '">打开 dsh</button></div></div>'; }).join("") : '<span class="muted">暂无实例</span>';
       $("error").textContent = "";
-    } catch (error) { if (error.message.indexOf("authorization") >= 0) showLogin(); else $("error").textContent = error.message; }
+    } catch (error) {
+      const message = error && error.message ? error.message : String(error || "请求失败");
+      renderDiagnosticsError(error);
+      if (message.indexOf("authorization") >= 0) showLogin();
+      else $("error").textContent = message;
+    }
   }
   async function command(action, agent, instance) {
     try { await api("/api/v1/instances/" + encodeURIComponent(agent) + "/" + encodeURIComponent(instance) + "/commands", { method: "POST", body: JSON.stringify({ action: action }) }); setTimeout(loadData, 500); }
