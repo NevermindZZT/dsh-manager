@@ -1,3 +1,840 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Cache-Control" content="no-store"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><title>dsh-manager</title><style>:root{color-scheme:dark;--bg:#0b1020;--panel:#141c31e8;--panel2:#18233d;--line:#2a3a5e;--text:#edf4ff;--muted:#91a4c5;--blue:#5b8cff;--green:#3dd598;--red:#ff6b7a}*{box-sizing:border-box}body{margin:0;min-height:100vh;font:14px/1.5 Segoe UI,system-ui,sans-serif;color:var(--text);background:radial-gradient(circle at 10% 0%,#1d3a70 0,#0b1020 42%),var(--bg)}button,input{font:inherit}button{border:0;border-radius:10px;padding:10px 15px;background:var(--blue);color:#fff;cursor:pointer;font-weight:600}button.secondary{background:#263653}button.danger{background:#a83b56}button{transition:transform .15s ease,filter .15s ease,box-shadow .15s ease}button:hover{filter:brightness(1.18);transform:translateY(-1px);box-shadow:0 6px 16px #0004}button:active{filter:brightness(.95);transform:translateY(0)}button:focus-visible{outline:3px solid #9bb8ff;outline-offset:2px}.shell{max-width:1320px;margin:auto;padding:28px 22px}.topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:26px}.brand{display:flex;align-items:center;gap:13px}.logo{width:44px;height:44px;border-radius:14px;display:block;flex-shrink:0}.brand h1{font-size:21px;margin:0}.version{font-size:11px;font-weight:500;color:var(--muted);vertical-align:middle}.brand small{display:block;color:var(--muted)}.top-actions{display:flex;gap:8px}.grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:16px;align-items:start}.card{grid-column:span 12;align-self:start;background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:20px;box-shadow:0 16px 50px #0003}.card.half{grid-column:span 6}.dashboard-columns,.dashboard-stack{display:contents}.dashboard-columns>.card,.dashboard-stack>.card{grid-column:span 12}.card h2{font-size:16px;margin:0 0 14px}.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.stat{background:var(--panel2);border-radius:14px;padding:15px}.stat b{font-size:26px;display:block}.muted{color:var(--muted)}.instance-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:13px}.card-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}.card-heading h2{margin:0}.pairing-panel{display:flex;align-items:center;justify-content:space-between;gap:16px}.pairing-value{min-width:0}.pairing-panel .actions{margin-top:0}.section-kicker{color:var(--muted);font-size:12px}.diagnostics-panel{display:grid;gap:14px}.diagnostics-meta{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;color:var(--muted);font-size:12px}.diagnostics-meta strong{color:var(--text);font-size:15px}.status-dot{width:8px;height:8px;border-radius:50%;display:inline-block;background:var(--muted)}.status-dot.online{background:var(--green);box-shadow:0 0 0 4px #3dd5981c}.diagnostics-section{display:grid;gap:8px}.diagnostics-section-title{color:var(--muted);font-size:12px;font-weight:600}.diagnostic-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px}.diagnostic-metric{min-width:0;border:1px solid #27395d;border-radius:10px;background:#0e172b;padding:9px 10px}.diagnostic-metric span{display:block;color:var(--muted);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.diagnostic-metric b{display:block;margin-top:2px;color:var(--text);font-size:18px;line-height:1.25}.diagnostic-metric b.warn{color:#f6c85f}.diagnostic-agents{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:7px}.diagnostic-agent{border:1px solid #27395d;border-radius:10px;background:#0e172b;padding:9px 10px}.diagnostic-agent-header{display:flex;justify-content:space-between;gap:8px}.diagnostic-agent-header code{margin:0;min-width:0}.diagnostic-agent-meta{display:flex;flex-wrap:wrap;gap:6px 12px;margin-top:4px;color:var(--muted);font-size:11px}.diagnostics-loading,.diagnostics-empty{color:var(--muted)}.diagnostics-error{display:grid;gap:4px;color:#ffb4bd}.diagnostics-error strong{color:var(--red)}.diagnostics-error small{color:var(--muted)}.diagnostics-footer{color:var(--muted);font-size:11px}.instance{background:linear-gradient(145deg,#182642,#111a2d);border:1px solid #2e4268;border-radius:15px;padding:16px}.instance-head{display:flex;justify-content:space-between;gap:8px}.instance h3{margin:0;font-size:15px}.pill{font-size:11px;border-radius:999px;padding:3px 8px;background:#263653;color:var(--muted)}.pill.online,.running{color:var(--green)}.failed,.offline{color:var(--red)}.instance code{display:block;color:#87adff;font-size:11px;margin:8px 0;white-space:normal;overflow-wrap:anywhere;word-break:break-word}.fingerprint{filter:blur(5px);user-select:none;cursor:pointer}.fingerprint.revealed{filter:none;user-select:text}.actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:12px}.actions button{font-size:12px;padding:7px 10px}.login-wrap{min-height:100vh;display:grid;place-items:center;padding:20px}.login{width:min(430px,100%);background:var(--panel);border:1px solid var(--line);border-radius:24px;padding:32px;box-shadow:0 24px 80px #0007}.login h1{margin:0 0 5px}.login p{color:var(--muted);margin:0 0 25px}.field{display:block;margin:14px 0}.field span{display:block;color:var(--muted);margin-bottom:6px}.field input{width:100%;border:1px solid var(--line);background:#0d1629;color:var(--text);border-radius:10px;padding:12px;outline:none}.login button{width:100%;margin-top:12px}.error{color:#ff8792;margin-top:12px;min-height:21px}.footer{display:flex;flex-direction:column;gap:8px}.footer-meta{color:var(--muted);font-size:12px}.footer-meta a{color:#87adff;text-decoration:none}.footer-meta a:hover{text-decoration:underline}.hidden{display:none!important}@media(max-width:720px){.shell{padding:20px 14px}.card.half{grid-column:span 12}.dashboard-columns{grid-template-columns:1fr}.pairing-panel{align-items:flex-start;flex-direction:column}.pairing-panel .actions{margin-top:12px}.stats{grid-template-columns:1fr 1fr}.topbar{align-items:flex-start}.top-actions{flex-direction:column}}@media(max-width:460px){.stats,.diagnostic-grid{grid-template-columns:1fr}}
-</style></head><body><section id="loginView" class="login-wrap"><form id="loginForm" class="login"><img class="logo" src="/favicon.svg" alt="dsh-manager" width="44" height="44"><h1>dsh-manager</h1><p>登录后管理所有已注册的 dsh 实例</p><label class="field"><span>用户名</span><input id="username" autocomplete="username" required value="admin"></label><label class="field"><span>密码</span><input id="password" type="password" autocomplete="current-password" required></label><button type="submit">登录管理控制台</button><div id="loginError" class="error"></div></form></section><section id="appView" class="shell hidden"><header class="topbar"><div class="brand"><img class="logo" src="/favicon.svg" alt="dsh-manager" width="44" height="44"><div><h1>dsh-manager <span id="version" class="version"></span></h1><small id="welcome">实例控制中心</small></div></div><div class="top-actions"><button id="refreshButton" class="secondary">刷新</button><button id="logoutButton" class="secondary">退出登录</button></div></header><main class="grid"><section class="card"><h2>运行概览</h2><div class="stats"><div class="stat"><span class="muted">在线 Agent</span><b id="agentCount">0</b></div><div class="stat"><span class="muted">dsh 实例</span><b id="instanceCount">0</b></div><div class="stat"><span class="muted">运行中</span><b id="runningCount">0</b></div></div></section><div class="dashboard-columns"><section class="card"><div class="card-heading"><h2>配对信息</h2><span class="section-kicker">新 Agent 使用一次性配对码</span></div><div class="instance pairing-panel"><div class="pairing-value"><div class="muted">当前配对码</div><code id="pairingCode">加载中…</code></div><div class="actions"><button id="refreshPairing" class="secondary">刷新配对码</button><button id="copyPairing" class="secondary">复制配对码</button></div></div></section><section class="card"><div class="card-heading"><h2>已注册电脑</h2><span class="section-kicker">Agent 在线状态</span></div><div id="agents" class="instance-grid"></div></section><section class="card"><h2>所有 dsh 实例</h2><div id="instances" class="instance-grid"></div></section><section class="card"><div class="card-heading"><h2>代理诊断</h2><span class="section-kicker">实时读取 manager 内部指标</span></div><div class="instance diagnostics-panel"><div id="diagnostics" class="diagnostics-loading">加载中…</div></div></section></div><section class="card footer"><div id="error" class="error"></div><span class="muted">Agent 使用同一端口的 HTTP/WS 连接；公网部署请由外部反向代理终止 HTTPS/WSS</span><span class="footer-meta">版本 <strong id="footerVersion">__DSH_MANAGER_VERSION__</strong> · <a href="https://github.com/NevermindZZT/dsh-manager" target="_blank" rel="noreferrer">dsh-manager</a></span></section></main></section><script src="/app.js" defer></script></body></html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-store">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<title>dsh-manager</title>
+<script>
+(function() {
+  var saved = localStorage.getItem('dsh-manager-theme') || 'system';
+  var isDark = saved === 'dark' || (saved === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  document.documentElement.setAttribute('data-theme', isDark ? 'dark' : 'light');
+  document.documentElement.setAttribute('data-theme-setting', saved);
+})();
+</script>
+<style>
+:root {
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 22px;
+  --transition: 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Light Theme */
+html[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f5f6f8;
+  --panel: #ffffff;
+  --panel-sub: #f0f2f5;
+  --panel-sub-hover: #e5e8ec;
+  --line: #e2e5e9;
+  --line-strong: #c8cdd4;
+  --text: #111418;
+  --text-secondary: #4a525d;
+  --muted: #6c7684;
+  --blue: #2563eb;
+  --blue-hover: #1d4ed8;
+  --blue-subtle: #eff6ff;
+  --green: #059669;
+  --green-subtle: #ecfdf5;
+  --red: #e11d48;
+  --red-subtle: #fff1f2;
+  --warn: #d97706;
+  --warn-subtle: #fffbeb;
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 16px -2px rgba(0, 0, 0, 0.06), 0 2px 6px -2px rgba(0, 0, 0, 0.03);
+  --shadow-lg: 0 16px 40px -6px rgba(0, 0, 0, 0.08);
+  --input-bg: #ffffff;
+  --code-bg: #f8f9fb;
+}
+
+/* Dark Theme - Strictly Neutral Gray / Black, NO Color Tint / Blue Cast */
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #09090b;             /* Pure neutral dark */
+  --panel: #131316;          /* Neutral dark panel surface */
+  --panel-sub: #1a1a1e;      /* Neutral dark sub-surface */
+  --panel-sub-hover: #232328;/* Subtle neutral hover */
+  --line: #26262a;           /* Neutral line border */
+  --line-strong: #38383e;    /* Stronger neutral border */
+  --text: #f4f4f6;           /* Crisp neutral white */
+  --text-secondary: #a0a0ab; /* Secondary neutral zinc */
+  --muted: #71717a;          /* Muted neutral zinc */
+  --blue: #3b82f6;           /* Blue action button */
+  --blue-hover: #60a5fa;     /* Blue hover */
+  --blue-subtle: #172033;    /* Subtle accent */
+  --green: #10b981;          /* Status green */
+  --green-subtle: #0d281e;   /* Subtle green badge */
+  --red: #f43f5e;            /* Status red */
+  --red-subtle: #31131a;     /* Subtle red badge */
+  --warn: #f59e0b;           /* Warning amber */
+  --warn-subtle: #291c09;    /* Subtle warning */
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 8px 24px -4px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 20px 48px -8px rgba(0, 0, 0, 0.65);
+  --input-bg: #09090b;
+  --code-bg: #09090b;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  font: 14px/1.55 var(--font-sans);
+  color: var(--text);
+  background: var(--bg);
+  transition: background-color var(--transition), color var(--transition);
+  -webkit-font-smoothing: antialiased;
+}
+
+button, input { font: inherit; }
+button {
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  padding: 8px 14px;
+  background: var(--blue);
+  color: #fff;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 13px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  transition: all var(--transition);
+}
+button:hover {
+  background: var(--blue-hover);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-sm);
+}
+button:active {
+  transform: translateY(0);
+}
+button:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+button.secondary {
+  background: var(--panel-sub);
+  color: var(--text);
+  border: 1px solid var(--line);
+}
+button.secondary:hover {
+  background: var(--panel-sub-hover);
+  border-color: var(--line-strong);
+}
+button.danger {
+  background: var(--red-subtle);
+  color: var(--red);
+  border: 1px solid rgba(244, 63, 94, 0.25);
+}
+button.danger:hover {
+  background: var(--red);
+  color: #fff;
+}
+
+.shell {
+  max-width: 1280px;
+  margin: auto;
+  padding: 32px 24px;
+}
+
+/* Topbar */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 28px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--line);
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.logo {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-md);
+  display: block;
+  flex-shrink: 0;
+  box-shadow: var(--shadow-sm);
+}
+.brand h1 {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.version {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  background: var(--panel-sub);
+  border: 1px solid var(--line);
+  padding: 2px 7px;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+}
+.version:empty { display: none; }
+.brand small {
+  display: block;
+  color: var(--text-secondary);
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.top-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Theme Switcher Segmented Control */
+.theme-toggle {
+  display: inline-flex;
+  background: var(--panel-sub);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 3px;
+  gap: 2px;
+}
+.theme-btn {
+  background: transparent;
+  color: var(--muted);
+  border: 0;
+  border-radius: calc(var(--radius-md) - 3px);
+  padding: 5px 9px;
+  font-size: 12px;
+  font-weight: 500;
+  gap: 5px;
+  box-shadow: none;
+  transform: none !important;
+}
+.theme-btn:hover {
+  background: var(--panel-sub-hover);
+  color: var(--text);
+  box-shadow: none;
+}
+.theme-btn.active {
+  background: var(--panel);
+  color: var(--text);
+  font-weight: 600;
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-sm);
+}
+.theme-btn svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: 2;
+}
+
+/* Grid & Cards */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 20px;
+  align-items: start;
+}
+.card {
+  grid-column: span 12;
+  align-self: start;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: 22px;
+  box-shadow: var(--shadow-md);
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+.card h2 {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 0 0 16px;
+}
+.card-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.card-heading h2 { margin: 0; }
+.section-kicker {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+/* Stats */
+.stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+}
+.stat {
+  background: var(--panel-sub);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: all var(--transition);
+}
+.stat:hover {
+  border-color: var(--line-strong);
+  background: var(--panel-sub-hover);
+}
+.stat .muted {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+}
+.stat b {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+}
+
+/* Dashboard Columns */
+.dashboard-columns {
+  display: contents;
+}
+.dashboard-columns > .card {
+  grid-column: span 12;
+}
+
+/* Pairing Panel */
+.pairing-panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  background: var(--panel-sub);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 18px 22px;
+}
+.pairing-value { min-width: 0; }
+.pairing-value .muted {
+  font-size: 12px;
+  font-weight: 500;
+  margin-bottom: 6px;
+}
+#pairingCode {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: 0.08em;
+  background: var(--code-bg);
+  border: 1px solid var(--line);
+  padding: 6px 14px;
+  border-radius: var(--radius-sm);
+  user-select: all;
+}
+.pairing-panel .actions {
+  margin-top: 0;
+  display: flex;
+  gap: 8px;
+}
+
+/* Instance Grid & Cards */
+.instance-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
+  gap: 14px;
+}
+.instance {
+  background: var(--panel-sub);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+.instance:hover {
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow-sm);
+}
+.instance-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.instance h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.instance code {
+  display: block;
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  font-size: 11px;
+  background: var(--code-bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  margin: 4px 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.instance .muted {
+  font-size: 12px;
+  color: var(--muted);
+}
+.actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: auto;
+  padding-top: 4px;
+}
+.actions button {
+  font-size: 12px;
+  padding: 6px 10px;
+}
+
+/* Pills */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 9999px;
+  padding: 3px 9px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.pill::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.85;
+}
+.pill.online, .pill.running {
+  background: var(--green-subtle);
+  color: var(--green);
+  border-color: rgba(16, 185, 129, 0.25);
+}
+.pill.failed, .pill.offline {
+  background: var(--red-subtle);
+  color: var(--red);
+  border-color: rgba(244, 63, 94, 0.25);
+}
+
+/* Diagnostics Panel */
+.diagnostics-panel {
+  display: grid;
+  gap: 18px;
+  background: var(--panel-sub);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 20px;
+}
+.diagnostics-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 20px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+.diagnostics-meta strong {
+  color: var(--text);
+  font-size: 14px;
+  margin-left: 4px;
+}
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  background: var(--muted);
+}
+.status-dot.online {
+  background: var(--green);
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.2);
+}
+.diagnostics-section {
+  display: grid;
+  gap: 10px;
+}
+.diagnostics-section-title {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.diagnostic-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px;
+}
+.diagnostic-metric {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  transition: border-color var(--transition);
+}
+.diagnostic-metric:hover {
+  border-color: var(--line-strong);
+}
+.diagnostic-metric span {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.diagnostic-metric b {
+  display: block;
+  margin-top: 4px;
+  color: var(--text);
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+.diagnostic-metric b.warn {
+  color: var(--warn);
+}
+.diagnostic-agents {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 10px;
+}
+.diagnostic-agent {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+}
+.diagnostic-agent-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.diagnostic-agent-header code {
+  margin: 0;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--code-bg);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.diagnostic-agent-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.diagnostics-footer {
+  color: var(--muted);
+  font-size: 11px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+.diagnostics-loading, .diagnostics-empty { color: var(--muted); }
+.diagnostics-error {
+  display: grid;
+  gap: 6px;
+  color: var(--red);
+}
+.diagnostics-error strong { color: var(--red); font-size: 14px; }
+.diagnostics-error small { color: var(--muted); }
+
+/* Login View */
+.login-wrap {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  position: relative;
+}
+.login-theme-bar {
+  position: absolute;
+  top: 24px;
+  right: 24px;
+}
+.login {
+  width: min(420px, 100%);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xl);
+  padding: 36px 32px;
+  box-shadow: var(--shadow-lg);
+  text-align: center;
+}
+.login .logo {
+  margin: 0 auto 16px;
+  width: 52px;
+  height: 52px;
+  border-radius: var(--radius-lg);
+}
+.login h1 {
+  margin: 0 0 6px;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+.login p {
+  color: var(--muted);
+  margin: 0 0 26px;
+  font-size: 13px;
+}
+.field {
+  display: block;
+  margin: 14px 0;
+  text-align: left;
+}
+.field span {
+  display: block;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  margin-bottom: 6px;
+}
+.field input {
+  width: 100%;
+  border: 1px solid var(--line);
+  background: var(--input-bg);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  font-size: 14px;
+  outline: none;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+.field input:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
+}
+.login button[type="submit"] {
+  width: 100%;
+  margin-top: 14px;
+  padding: 11px;
+  font-size: 14px;
+}
+.error {
+  color: var(--red);
+  font-size: 12px;
+  margin-top: 10px;
+  min-height: 18px;
+  font-weight: 500;
+  transition: color var(--transition);
+}
+.error:empty { display: none; }
+.error.success { color: var(--green); }
+button.copied {
+  background: var(--green-subtle) !important;
+  color: var(--green) !important;
+  border-color: rgba(16, 185, 129, 0.35) !important;
+}
+
+/* Footer */
+.footer {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 20px;
+  font-size: 12px;
+}
+.footer-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+.footer-meta a {
+  color: var(--blue);
+  text-decoration: none;
+}
+.footer-meta a:hover {
+  text-decoration: underline;
+}
+
+.hidden { display: none !important; }
+
+@media(max-width: 768px) {
+  .shell { padding: 20px 16px; }
+  .topbar { flex-direction: column; align-items: flex-start; gap: 16px; }
+  .top-actions { width: 100%; justify-content: space-between; }
+  .stats { grid-template-columns: 1fr; }
+  .pairing-panel { flex-direction: column; align-items: flex-start; }
+  .pairing-panel .actions { width: 100%; }
+  .pairing-panel .actions button { flex: 1; }
+}
+</style>
+</head>
+<body>
+
+<!-- Login View -->
+<section id="loginView" class="login-wrap">
+  <div class="login-theme-bar">
+    <div class="theme-toggle" role="group" aria-label="主题切换">
+      <button type="button" class="theme-btn" data-theme="system" title="跟随系统/终端">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+        <span>系统</span>
+      </button>
+      <button type="button" class="theme-btn" data-theme="light" title="浅色模式">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+        <span>浅色</span>
+      </button>
+      <button type="button" class="theme-btn" data-theme="dark" title="深色模式">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        <span>深色</span>
+      </button>
+    </div>
+  </div>
+  <form id="loginForm" class="login">
+    <img class="logo" src="/favicon.svg" alt="dsh-manager" width="52" height="52">
+    <h1>dsh-manager</h1>
+    <p>登录后管理所有已注册的 dsh 实例</p>
+    <label class="field">
+      <span>用户名</span>
+      <input id="username" autocomplete="username" required value="admin">
+    </label>
+    <label class="field">
+      <span>密码</span>
+      <input id="password" type="password" autocomplete="current-password" required>
+    </label>
+    <button type="submit">登录管理控制台</button>
+    <div id="loginError" class="error"></div>
+  </form>
+</section>
+
+<!-- Dashboard View -->
+<section id="appView" class="shell hidden">
+  <header class="topbar">
+    <div class="brand">
+      <img class="logo" src="/favicon.svg" alt="dsh-manager" width="44" height="44">
+      <div>
+        <h1>dsh-manager <span id="version" class="version"></span></h1>
+        <small id="welcome">实例控制中心</small>
+      </div>
+    </div>
+    <div class="top-actions">
+      <div class="theme-toggle" role="group" aria-label="主题切换">
+        <button type="button" class="theme-btn" data-theme="system" title="跟随系统/终端">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+          <span>系统</span>
+        </button>
+        <button type="button" class="theme-btn" data-theme="light" title="浅色模式">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+          <span>浅色</span>
+        </button>
+        <button type="button" class="theme-btn" data-theme="dark" title="深色模式">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+          <span>深色</span>
+        </button>
+      </div>
+      <button id="refreshButton" class="secondary">刷新</button>
+      <button id="logoutButton" class="secondary">退出登录</button>
+    </div>
+  </header>
+  <main class="grid">
+    <section class="card">
+      <h2>运行概览</h2>
+      <div class="stats">
+        <div class="stat">
+          <span class="muted">在线 Agent</span>
+          <b id="agentCount">0</b>
+        </div>
+        <div class="stat">
+          <span class="muted">dsh 实例</span>
+          <b id="instanceCount">0</b>
+        </div>
+        <div class="stat">
+          <span class="muted">运行中</span>
+          <b id="runningCount">0</b>
+        </div>
+      </div>
+    </section>
+
+    <div class="dashboard-columns">
+      <section class="card">
+        <div class="card-heading">
+          <h2>配对信息</h2>
+          <span class="section-kicker">新 Agent 使用一次性配对码</span>
+        </div>
+        <div class="pairing-panel">
+          <div class="pairing-value">
+            <div class="muted">当前配对码</div>
+            <code id="pairingCode">加载中…</code>
+          </div>
+          <div class="actions">
+            <button id="refreshPairing" class="secondary">刷新配对码</button>
+            <button id="copyPairing" class="secondary">复制配对码</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-heading">
+          <h2>已注册电脑</h2>
+          <span class="section-kicker">Agent 在线状态</span>
+        </div>
+        <div id="agents" class="instance-grid"></div>
+      </section>
+
+      <section class="card">
+        <h2>所有 dsh 实例</h2>
+        <div id="instances" class="instance-grid"></div>
+      </section>
+
+      <section class="card">
+        <div class="card-heading">
+          <h2>代理诊断</h2>
+          <span class="section-kicker">实时读取 manager 内部指标</span>
+        </div>
+        <div id="diagnostics" class="diagnostics-loading">加载中…</div>
+      </section>
+    </div>
+
+    <section class="card footer">
+      <div id="error" class="error"></div>
+      <span class="muted">Agent 使用同一端口的 HTTP/WS 连接；公网部署请由外部反向代理终止 HTTPS/WSS</span>
+      <span class="footer-meta">版本 <strong id="footerVersion">__DSH_MANAGER_VERSION__</strong> · <a href="https://github.com/NevermindZZT/dsh-manager" target="_blank" rel="noreferrer">dsh-manager</a></span>
+    </section>
+  </main>
+</section>
+
+<script src="/app.js" defer></script>
+</body>
+</html>

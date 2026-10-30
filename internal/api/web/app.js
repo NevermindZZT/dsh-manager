@@ -92,8 +92,14 @@
     const info = await api("/api/v1/admin/pairing");
     $("pairingCode").textContent = info.pairingCode || "";
   }
-  async function refreshPairing() { try { const info = await api("/api/v1/admin/pairing/refresh", { method: "POST" }); $("pairingCode").textContent = info.pairingCode || ""; } catch (error) { $("error").textContent = error.message; } }
-  async function copyText(id) {
+  function setNotice(text, isError) {
+    const el = $("error");
+    if (!el) return;
+    el.textContent = text || "";
+    el.className = isError ? "error" : "error success";
+  }
+  async function refreshPairing() { try { const info = await api("/api/v1/admin/pairing/refresh", { method: "POST" }); $("pairingCode").textContent = info.pairingCode || ""; } catch (error) { setNotice(error.message, true); } }
+  async function copyText(id, button) {
     const node = $(id);
     const text = node.dataset.value || node.textContent || "";
     try {
@@ -112,9 +118,18 @@
         document.body.removeChild(area);
         if (!copied) throw new Error("copy command failed");
       }
-      $("error").textContent = "已复制";
+      setNotice("已复制 ✓", false);
+      if (button) {
+        const orig = button.textContent;
+        button.textContent = "已复制 ✓";
+        button.classList.add("copied");
+        setTimeout(function () {
+          button.textContent = orig;
+          button.classList.remove("copied");
+        }, 1500);
+      }
     } catch (error) {
-      $("error").textContent = "复制失败，请手动选择文本";
+      setNotice("复制失败，请手动选择文本", true);
     }
   }
   async function loadData() {
@@ -132,21 +147,21 @@
       $("runningCount").textContent = instances.filter(function (x) { return x.state === "running"; }).length;
       $("agents").innerHTML = agents.length ? agents.map(function (x) { var id = x.id || x.agentId || ""; return '<div class="instance"><div class="instance-head"><h3>' + esc(x.name) + '</h3><span class="pill ' + (x.online ? 'online' : 'offline') + '">' + (x.online ? '在线' : '离线') + '</span></div><code>' + esc(id) + '</code><span class="muted">' + esc(x.platform) + ' · ' + esc(x.agentType || 'launcher') + ' · ' + esc(x.launcherVersion || x.pluginVersion || '') + '</span><div class=actions><button class=danger data-action=revoke data-agent="' + escAttr(id) + '">取消配对</button></div></div>'; }).join("") : '<span class="muted">暂无 Agent</span>';
       $("instances").innerHTML = instances.length ? instances.map(function (x) { return '<div class="instance"><div class="instance-head"><h3>' + esc(x.displayName) + '</h3><span class="pill ' + escAttr(x.state) + '">' + esc(x.state) + '</span></div><div class=muted>电脑：' + esc(x.agentName || x.agentId) + '</div><code>' + esc(x.agentId + '/' + x.instanceId) + '</code><span class="muted">' + (x.urlAvailable ? '服务地址可用' : '服务未就绪') + '</span><div class="actions"><button data-action="start" data-agent="' + escAttr(x.agentId) + '" data-instance="' + escAttr(x.instanceId) + '">启动</button><button class="danger" data-action="stop" data-agent="' + escAttr(x.agentId) + '" data-instance="' + escAttr(x.instanceId) + '">停止</button><button data-action="restart" data-agent="' + escAttr(x.agentId) + '" data-instance="' + escAttr(x.instanceId) + '">重启</button><button class="secondary" data-action="open" data-agent="' + escAttr(x.agentId) + '" data-instance="' + escAttr(x.instanceId) + '">打开 dsh</button></div></div>'; }).join("") : '<span class="muted">暂无实例</span>';
-      $("error").textContent = "";
+      setNotice("", false);
     } catch (error) {
       const message = error && error.message ? error.message : String(error || "请求失败");
       renderDiagnosticsError(error);
       if (message.indexOf("authorization") >= 0) showLogin();
-      else $("error").textContent = message;
+      else setNotice(message, true);
     }
   }
   async function command(action, agent, instance) {
     try { await api("/api/v1/instances/" + encodeURIComponent(agent) + "/" + encodeURIComponent(instance) + "/commands", { method: "POST", body: JSON.stringify({ action: action }) }); setTimeout(loadData, 500); }
-    catch (error) { $("error").textContent = error.message; }
+    catch (error) { setNotice(error.message, true); }
   }
   async function openDsh(agent, instance) {
     try { const result = await api("/api/v1/instances/" + encodeURIComponent(agent) + "/" + encodeURIComponent(instance) + "/open", { method: "POST" }); window.location.href = result.url || "/"; }
-    catch (error) { $("error").textContent = error.message; }
+    catch (error) { setNotice(error.message, true); }
   }
   function confirmRevoke(name) {
     return new Promise(function (resolve) {
@@ -155,10 +170,10 @@
       dialog.style.border = "0";
       dialog.style.padding = "0";
       dialog.style.background = "transparent";
-      dialog.style.borderRadius = "14px";
+      dialog.style.borderRadius = "var(--radius-lg)";
       dialog.style.boxShadow = "none";
       dialog.style.overflow = "visible";
-      dialog.innerHTML = '<form method="dialog" style="min-width:min(420px,calc(100vw - 48px));padding:24px;border:0;border-radius:14px;background:#141c31;color:#edf4ff;box-shadow:0 20px 80px #0008"><h3 id="dsh-revoke-title" style="margin:0 0 12px;font-size:18px">确认取消配对</h3><p style="margin:0 0 20px;color:#b8c6df">确定取消电脑「' + esc(name) + '」的配对吗？其关联 dsh 实例也会被移除。</p><div style="display:flex;justify-content:flex-end;gap:8px"><button value="cancel" type="button">取消</button><button id="dsh-revoke-confirm" value="confirm" type="button" style="background:#a83b56;color:#fff">确认取消配对</button></div></form>';
+      dialog.innerHTML = '<form method="dialog" style="min-width:min(420px,calc(100vw - 48px));padding:24px;border:1px solid var(--line);border-radius:var(--radius-lg);background:var(--panel);color:var(--text);box-shadow:var(--shadow-lg)"><h3 id="dsh-revoke-title" style="margin:0 0 10px;font-size:17px;font-weight:600">确认取消配对</h3><p style="margin:0 0 20px;color:var(--text-secondary);font-size:13px;line-height:1.5">确定取消电脑「' + esc(name) + '」的配对吗？其关联 dsh 实例也会被移除。</p><div style="display:flex;justify-content:flex-end;gap:10px"><button value="cancel" type="button" class="secondary">取消</button><button id="dsh-revoke-confirm" value="confirm" type="button" class="danger">确认取消配对</button></div></form>';
       document.body.appendChild(dialog);
       const finish = function (value) { dialog.close(); dialog.remove(); resolve(value); };
       dialog.querySelector("button[value=cancel]").onclick = function () { finish(false); };
@@ -172,7 +187,7 @@
     const name = card?.querySelector("h3")?.textContent || agent;
     if (!(await confirmRevoke(name))) return;
     if (button) { button.disabled = true; button.textContent = "取消中…"; }
-    $("error").textContent = "正在取消配对…";
+    setNotice("正在取消配对…", false);
     try {
       try {
         const result = await api("/api/v1/admin/agents/" + encodeURIComponent(agent) + "/revoke", { method: "POST" });
@@ -185,17 +200,43 @@
       }
       card?.remove();
       try { await loadData(); } catch {}
-      $("error").textContent = "已取消配对";
+      setNotice("已取消配对", false);
     } catch (error) {
       if (button) { button.disabled = false; button.textContent = "取消配对"; }
-      $("error").textContent = error.message;
+      setNotice(error.message, true);
     }
   }
+  function initTheme() {
+    function applyTheme(setting) {
+      localStorage.setItem("dsh-manager-theme", setting);
+      const isDark = setting === "dark" || (setting === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+      document.documentElement.setAttribute("data-theme", isDark ? "dark" : "light");
+      document.documentElement.setAttribute("data-theme-setting", setting);
+      document.querySelectorAll(".theme-btn").forEach(function(btn) {
+        if (btn.dataset.theme === setting) btn.classList.add("active");
+        else btn.classList.remove("active");
+      });
+    }
+    const currentSetting = localStorage.getItem("dsh-manager-theme") || "system";
+    applyTheme(currentSetting);
+    document.addEventListener("click", function(e) {
+      const btn = e.target.closest(".theme-btn");
+      if (!btn || !btn.dataset.theme) return;
+      applyTheme(btn.dataset.theme);
+    });
+    window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", function() {
+      const setting = localStorage.getItem("dsh-manager-theme") || "system";
+      if (setting === "system") {
+        applyTheme("system");
+      }
+    });
+  }
+  initTheme();
   $("loginForm").addEventListener("submit", login);
   $("refreshButton").addEventListener("click", loadData);
   $("logoutButton").addEventListener("click", logout);
   $("refreshPairing").addEventListener("click", refreshPairing);
-  $("copyPairing").addEventListener("click", function () { copyText("pairingCode"); });
+  $("copyPairing").addEventListener("click", function (e) { copyText("pairingCode", e.currentTarget); });
   $("instances").addEventListener("click", function (event) { const button = event.target.closest("button[data-action]"); if (!button) return; const action = button.dataset.action; if (action === "open") openDsh(button.dataset.agent, button.dataset.instance); else command(action, button.dataset.agent, button.dataset.instance); });
   $("agents").addEventListener("click", function (event) { const button = event.target.closest("button[data-action=revoke]"); if (button) revokeAgent(button.dataset.agent, button); });
   api("/api/v1/auth/me").then(function (result) { showApp(result.username, result.version); return loadData(); }).catch(showLogin);
