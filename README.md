@@ -203,6 +203,17 @@ manager 代理 HTML、静态资源、REST API、上传下载和 WebSocket。目�
 
 `startupUrl` 是瞬时 bearer 信息，只能在内存中的 Agent WebSocket 消息中使用，manager 数据库和实例列表 API 不会返回它。
 
+## 远程 `/compact` 长请求
+
+DSH 的手动上下文压缩可能需要数分钟。Manager 对控制 API 使用缓冲转发；若一直等到摘要完成才向浏览器响应，公网反向代理可能先因长时间没有响应而关闭请求，Manager 再把取消传给 DSH，表现为 `This operation was aborted` 和摘要流缺少终止事件。
+
+Manager 现在仅对原生 `POST /api/commands/execute` 中的小型、无附件 `/compact` JSON RPC，在等待完整上游结果时每 15 秒向浏览器发送并刷新一个合法 JSON 空白。最终仍返回同一个 `rpcId` 的原始结果；真实浏览器断开会继续取消任务，错误不会被标为成功。
+
+- 保活直接发生在 Manager 公网响应端，因此不要求 Agent 把控制 API 改成流式协议，也不需要安装额外 DSH 插件。
+- 普通命令、设置、启动、上传以及静态资源的现有转发方式不变；请求检查的所有字节都会原样重放。
+- 此行为处理无响应造成的空闲超时，不绕过外部代理的绝对请求时限。Manager 与 Agent 原有的 5 分钟总/空闲预算仍然有效；超出预算会失败，不会无限运行。
+- 修改源码或本地测试通过不代表远端已更新，需要重新构建并部署 Manager 后再从实际远程入口验收。
+
 ## 安全边界
 
 - Agent Token 只在 enrollment 响应中返回一次；

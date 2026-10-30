@@ -23,6 +23,27 @@ go build -trimpath -o .\bin\dsh-manager.exe .\cmd\dsh-manager
 
 覆盖：SQLite registry、HTTP enrollment、heartbeat、Dashboard 登录、Agent WS 命令、浏览器 HTTP/WS tunnel、startup bootstrap redirect、Cookie forwarding、gzip 响应转发、哈希静态资源缓存和二进制 HTTP 响应帧回退。
 
+### 手动上下文压缩长请求回归
+
+```sh
+go test ./internal/api -run Compact -count=1
+go test ./...
+```
+
+新增回归需要覆盖：仅识别原生无附件 `/compact`、探测后完整重放请求体、Manager 在上游摘要完成前刷新合法 JSON 空白、最终 `rpcId` 和真实原生 `result.value` / `result.error` 保持一致、保活后的网关错误不冒充成功、浏览器真实断开仍发送 `proxy_cancel`。不得把所有 DSH API 或上传都切换为流式协议。
+
+终结回归必须使用带真实 `http.Server.WriteTimeout` 的 socket，验证原写截止已过后仍能收到完整成功/失败 JSON；覆盖流式请求上传、二进制结果、晚到 Cookie、错误 Base64 与错误 RPC schema。连接生命周期覆盖断连、同ID替换、双向伪造响应、旧连接迟到清理、上传阻塞中断、pending与HTTP并发槽释放，并运行竞态检测：
+
+```sh
+go test -race ./internal/api -run 'Compact|Pending' -count=3
+# 可选：保留生产300秒任务预算、300秒默认写截止及15秒心跳；Agent故意不回复，约5分钟结束。
+DSH_MANAGER_FULL_TIMEOUT_TEST=1 go test -v -timeout=340s ./internal/api -run '^TestCompactProductionTimeout$' -count=1
+```
+
+上面的五分钟回归是确定性的协议Agent夹具，不调用模型，不等同真实DSH摘要成功或公网入口验收。插件另需通过真实Cordis Context/Fiber（含丢弃入口返回值的适配器）热停用复验：等待异步关闭、端口可重新绑定、无残留重连timer，并验证实际打包产物。
+
+实际部署验收应从用户原本的 **Manager 公网入口** 执行一次耗时超过原故障时间点的 `/compact`：浏览器网络响应应每约 15 秒收到刷新内容，最后得到合法原生 RPC 结果。只从 `127.0.0.1` 成功、只做短请求，或仅通过加速时间的本地测试，都不等于公网验收通过。原有 5 分钟总请求预算与真实主动取消仍须生效；如果外部代理有不可续期的绝对时限，需要另行调整该代理或使用异步任务设计。
+
 ### plugin
 
 ```powershell

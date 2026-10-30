@@ -95,7 +95,12 @@ func TestStreamOverflowIncrementsCounter(t *testing.T) {
 	for range proxyStreamQueue {
 		stream.chunks <- proxyChunk{}
 	}
-	srv := &Server{logger: slog.New(slog.NewTextHandler(io.Discard, nil)), pending: map[string]*proxyStream{"proxy-overflow": stream}}
+	srv := &Server{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	session := &agentSession{agentID: "agent"}
+	srv.installAgentSession(session)
+	if err := srv.registerPendingStream(session, "proxy-overflow", stream); err != nil {
+		t.Fatal(err)
+	}
 	if err := srv.handleAgentBinaryMessage("agent", proxyBinaryMessage(agentMessage{Type: "proxy_response_chunk_binary", RequestID: "proxy-overflow"}, []byte("x"))); err != nil {
 		t.Fatal(err)
 	}

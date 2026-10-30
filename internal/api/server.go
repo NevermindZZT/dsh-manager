@@ -42,23 +42,26 @@ const (
 )
 
 type Server struct {
-	cfg              config.Config
-	db               *storage.DB
-	logger           *slog.Logger
-	pairingMu        sync.Mutex
-	pairingCode      string
-	sessionsMu       sync.RWMutex
-	sessions         map[string]*agentSession
-	pendingMu        sync.Mutex
-	pending          map[string]*proxyStream
-	tunnelMu         sync.Mutex
-	tunnels          map[string]chan agentMessage
-	webTargetsMu     sync.RWMutex
-	webTargets       map[string]webTarget
-	sessionsAuthMu   sync.Mutex
-	authSessions     map[string]time.Time
-	proxyStats       proxyStats
-	rewrittenJSCache *rewrittenJSCache
+	cfg                      config.Config
+	db                       *storage.DB
+	logger                   *slog.Logger
+	pairingMu                sync.Mutex
+	pairingCode              string
+	sessionsMu               sync.RWMutex
+	sessions                 map[string]*agentSession
+	pendingMu                sync.Mutex
+	pending                  map[string]*proxyStream
+	tunnelMu                 sync.Mutex
+	tunnels                  map[string]chan agentMessage
+	webTargetsMu             sync.RWMutex
+	webTargets               map[string]webTarget
+	sessionsAuthMu           sync.Mutex
+	authSessions             map[string]time.Time
+	proxyStats               proxyStats
+	rewrittenJSCache         *rewrittenJSCache
+	compactHeartbeatInterval time.Duration // zero uses compactHeartbeatEvery
+	compactProxyTimeout      time.Duration // zero uses proxyHTTPTimeout
+	compactWriteGrace        time.Duration // zero uses compactTerminalWriteGrace
 }
 
 type webTarget struct {
@@ -421,22 +424,14 @@ func (s *Server) agentConnect(w http.ResponseWriter, r *http.Request) {
 	// leave headroom for large session.list payloads and JSON framing.
 	conn.SetReadLimit(agentMessageReadLimit)
 	session := &agentSession{agentID: agentID, conn: conn, scheduler: newOutboundScheduler(conn), agentType: "launcher", startupAvailable: make(map[string]bool)}
-	s.sessionsMu.Lock()
-	previous := s.sessions[agentID]
-	s.sessions[agentID] = session
-	s.sessionsMu.Unlock()
+	previous := s.installAgentSession(session)
 	if previous != nil {
-		_ = previous.conn.Close(websocket.StatusPolicyViolation, "replaced by newer connection")
+		previous.conn.CloseNow()
 	}
 	defer func() {
+		current := s.removeAgentSession(session)
 		session.scheduler.close()
 		conn.CloseNow()
-		s.sessionsMu.Lock()
-		current := s.sessions[agentID] == session
-		if current {
-			delete(s.sessions, agentID)
-		}
-		s.sessionsMu.Unlock()
 		if current {
 			if err := s.db.MarkAgentOffline(agentID); err != nil {
 				s.logger.Warn("mark agent offline failed", "agentId", agentID, "error", err)
@@ -452,7 +447,7 @@ func (s *Server) agentConnect(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		if messageType == websocket.MessageBinary {
-			if err := s.handleAgentBinaryMessage(agentID, data); err != nil {
+			if err := s.handleAgentSessionBinaryMessage(session, data); err != nil {
 				s.logger.Warn("binary agent message failed", "agentId", agentID, "error", err)
 			}
 			continue
@@ -462,7 +457,7 @@ func (s *Server) agentConnect(w http.ResponseWriter, r *http.Request) {
 			s.logger.Warn("invalid agent message", "agentId", agentID, "error", err)
 			continue
 		}
-		if err := s.handleAgentMessage(agentID, message); err != nil {
+		if err := s.handleAgentSessionMessage(session, message); err != nil {
 			s.logger.Warn("agent message failed", "agentId", agentID, "type", message.Type, "error", err)
 		}
 	}
@@ -470,6 +465,17 @@ func (s *Server) agentConnect(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAgentMessage(agentID string, message agentMessage) error {
+	s.sessionsMu.RLock()
+	session := s.sessions[agentID]
+	s.sessionsMu.RUnlock()
+	if session == nil {
+		return errAgentSessionDisconnected
+	}
+	return s.handleAgentSessionMessage(session, message)
+}
+
+func (s *Server) handleAgentSessionMessage(session *agentSession, message agentMessage) error {
+	agentID := session.agentID
 	switch message.Type {
 	case "register", "heartbeat":
 		s.logger.Info("agent state received", "agentId", agentID, "type", message.Type, "name", message.Name, "agentType", message.AgentType, "instances", len(message.Instances), "capabilities", message.Capabilities)
@@ -485,18 +491,22 @@ func (s *Server) handleAgentMessage(agentID string, message agentMessage) error 
 		return nil
 	case "proxy_response", "proxy_response_start":
 		response := proxyResponse{RequestID: message.RequestID, Status: message.Status, Headers: message.Headers, SetCookies: message.SetCookies, Body: message.Body, Error: message.Error}
-		if stream := s.pendingStream(message.RequestID); stream != nil {
+		s.withSessionPendingStream(session, message.RequestID, func(stream *proxyStream) {
 			stream.deliverHeader(response)
-		}
+		})
 		return nil
 	case "proxy_response_end":
-		if stream := s.pendingStream(message.RequestID); stream != nil {
+		overflow := false
+		s.withSessionPendingStream(session, message.RequestID, func(stream *proxyStream) {
 			if message.Error != "" {
 				stream.fail(errors.New(message.Error))
-			} else if !stream.deliverChunk(proxyChunk{final: true}) {
-				overflows := s.proxyStats.streamOverflow.Add(1)
-				s.logger.Warn("proxy response stream final marker dropped", "agentId", agentID, "requestId", message.RequestID, "overflows", overflows)
+			} else {
+				overflow = !stream.deliverChunk(proxyChunk{final: true})
 			}
+		})
+		if overflow {
+			overflows := s.proxyStats.streamOverflow.Add(1)
+			s.logger.Warn("proxy response stream final marker dropped", "agentId", agentID, "requestId", message.RequestID, "overflows", overflows)
 		}
 		return nil
 	case "proxy_ws_open_result", "proxy_ws_frame", "proxy_ws_close":
@@ -508,6 +518,17 @@ func (s *Server) handleAgentMessage(agentID string, message agentMessage) error 
 }
 
 func (s *Server) handleAgentBinaryMessage(agentID string, data []byte) error {
+	s.sessionsMu.RLock()
+	session := s.sessions[agentID]
+	s.sessionsMu.RUnlock()
+	if session == nil {
+		return errAgentSessionDisconnected
+	}
+	return s.handleAgentSessionBinaryMessage(session, data)
+}
+
+func (s *Server) handleAgentSessionBinaryMessage(session *agentSession, data []byte) error {
+	agentID := session.agentID
 	separator := bytes.IndexByte(data, '\n')
 	if separator <= 0 {
 		return fmt.Errorf("binary agent message is missing JSON header")
@@ -519,11 +540,15 @@ func (s *Server) handleAgentBinaryMessage(agentID string, data []byte) error {
 	payload := append([]byte(nil), data[separator+1:]...)
 	switch message.Type {
 	case "proxy_response_binary":
-		if stream := s.pendingStream(message.RequestID); stream != nil {
+		s.withSessionPendingStream(session, message.RequestID, func(stream *proxyStream) {
 			stream.deliverHeader(proxyResponse{RequestID: message.RequestID, Status: message.Status, Headers: message.Headers, SetCookies: message.SetCookies, BodyBytes: payload, BodyBytesSet: true, Error: message.Error})
-		}
+		})
 	case "proxy_response_chunk_binary":
-		if stream := s.pendingStream(message.RequestID); stream != nil && !stream.deliverChunk(proxyChunk{data: payload, final: message.Final}) {
+		overflow := false
+		s.withSessionPendingStream(session, message.RequestID, func(stream *proxyStream) {
+			overflow = !stream.deliverChunk(proxyChunk{data: payload, final: message.Final})
+		})
+		if overflow {
 			overflows := s.proxyStats.streamOverflow.Add(1)
 			s.logger.Warn("proxy response stream exceeded bounded buffer", "agentId", agentID, "requestId", message.RequestID, "overflows", overflows)
 		}
@@ -747,13 +772,17 @@ type proxyChunk struct {
 // proxyStream keeps each proxied response isolated. Its bounded channels ensure a
 // slow browser cannot stall the Agent connection's single reader goroutine.
 type proxyStream struct {
-	headers chan proxyResponse
-	chunks  chan proxyChunk
-	errors  chan error
+	session  *agentSession
+	failed   chan struct{}
+	failOnce sync.Once
+	headers  chan proxyResponse
+	chunks   chan proxyChunk
+	errors   chan error
 }
 
 func newProxyStream() *proxyStream {
 	return &proxyStream{
+		failed:  make(chan struct{}),
 		headers: make(chan proxyResponse, 1),
 		chunks:  make(chan proxyChunk, proxyStreamQueue),
 		errors:  make(chan error, 1),
@@ -765,6 +794,11 @@ func (p *proxyStream) fail(err error) {
 	case p.errors <- err:
 	default:
 	}
+	p.failOnce.Do(func() {
+		if p.failed != nil {
+			close(p.failed)
+		}
+	})
 }
 
 func (p *proxyStream) deliverHeader(response proxyResponse) {
@@ -813,7 +847,7 @@ func (s *Server) cancelProxyRequest(session *agentSession, requestID, instanceID
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := s.writeAgentJSONPriority(ctx, session, map[string]string{"type": "proxy_cancel", "requestId": requestID, "instanceId": instanceID, "reason": reason}, outboundCritical); err != nil {
+	if err := s.writeAgentJSONForSession(ctx, session, map[string]string{"type": "proxy_cancel", "requestId": requestID, "instanceId": instanceID, "reason": reason}, outboundCritical); err != nil {
 		s.logger.Warn("proxy cancel send failed", "agentId", session.agentID, "requestId", requestID, "reason", reason, "error", err)
 		return
 	}
@@ -1196,13 +1230,13 @@ func (s *Server) proxyHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) sendProxyRequest(ctx context.Context, session *agentSession, request proxyRequest, body io.Reader, stream bool) error {
 	if !stream {
-		return s.writeAgentJSON(ctx, session, request)
+		return s.writeAgentJSONForSession(ctx, session, request, outboundInteractive)
 	}
-	if err := s.writeAgentJSON(ctx, session, request); err != nil {
+	if err := s.writeAgentJSONForSession(ctx, session, request, outboundInteractive); err != nil {
 		return err
 	}
 	if body == nil {
-		return s.writeAgentJSON(ctx, session, agentMessage{Type: "proxy_request_end", RequestID: request.RequestID, InstanceID: request.InstanceID})
+		return s.writeAgentJSONForSession(ctx, session, agentMessage{Type: "proxy_request_end", RequestID: request.RequestID, InstanceID: request.InstanceID}, outboundInteractive)
 	}
 	buf := make([]byte, proxyChunkSize)
 	var total int64
@@ -1211,12 +1245,12 @@ func (s *Server) sendProxyRequest(ctx context.Context, session *agentSession, re
 		if n > 0 {
 			total += int64(n)
 			if total > proxyRequestMaxBytes {
-				_ = s.writeAgentJSON(ctx, session, agentMessage{Type: "proxy_request_end", RequestID: request.RequestID, InstanceID: request.InstanceID, Error: "request body too large"})
+				_ = s.writeAgentJSONForSession(ctx, session, agentMessage{Type: "proxy_request_end", RequestID: request.RequestID, InstanceID: request.InstanceID, Error: "request body too large"}, outboundInteractive)
 				return fmt.Errorf("proxy request body exceeds %d bytes", proxyRequestMaxBytes)
 			}
 			chunk := append([]byte(nil), buf[:n]...)
 			if err := writeAgentBinary(ctx, session, agentMessage{Type: "proxy_request_chunk_binary", RequestID: request.RequestID, InstanceID: request.InstanceID}, chunk); err != nil {
-				_ = s.writeAgentJSON(ctx, session, agentMessage{Type: "proxy_request_end", RequestID: request.RequestID, InstanceID: request.InstanceID, Error: "request stream failed"})
+				_ = s.writeAgentJSONForSession(ctx, session, agentMessage{Type: "proxy_request_end", RequestID: request.RequestID, InstanceID: request.InstanceID, Error: "request stream failed"}, outboundInteractive)
 				return err
 			}
 		}
@@ -1224,11 +1258,11 @@ func (s *Server) sendProxyRequest(ctx context.Context, session *agentSession, re
 			break
 		}
 		if readErr != nil {
-			_ = s.writeAgentJSON(ctx, session, agentMessage{Type: "proxy_request_end", RequestID: request.RequestID, InstanceID: request.InstanceID, Error: "request body read failed"})
+			_ = s.writeAgentJSONForSession(ctx, session, agentMessage{Type: "proxy_request_end", RequestID: request.RequestID, InstanceID: request.InstanceID, Error: "request body read failed"}, outboundInteractive)
 			return fmt.Errorf("read proxy request body: %w", readErr)
 		}
 	}
-	return s.writeAgentJSON(ctx, session, agentMessage{Type: "proxy_request_end", RequestID: request.RequestID, InstanceID: request.InstanceID})
+	return s.writeAgentJSONForSession(ctx, session, agentMessage{Type: "proxy_request_end", RequestID: request.RequestID, InstanceID: request.InstanceID}, outboundInteractive)
 }
 
 func (s *Server) proxyHTTPForTarget(w http.ResponseWriter, r *http.Request, target webTarget, sessionID string, bootstrap bool) {
@@ -1247,6 +1281,42 @@ func (s *Server) proxyHTTPForTarget(w http.ResponseWriter, r *http.Request, targ
 	}
 	if isImmutableAssetPath(r.URL.Path) && requiresBrowserCompatibility(r.URL.Path) && s.rewrittenJSCache.serve(w, r, rewrittenJSCacheKey(target, r)) {
 		return
+	}
+	compact, prepareErr := prepareCompactKeepalive(r)
+	if prepareErr != nil {
+		http.Error(w, "read command request failed", http.StatusBadRequest)
+		return
+	}
+	if compact != nil && s.compactHeartbeatInterval > 0 {
+		compact.interval = s.compactHeartbeatInterval
+	}
+	proxyError := func(status int, message string) {
+		if compact != nil {
+			if err := compact.fail(w, status, message); err != nil {
+				s.logger.Warn("compact terminal response failed", "error", err)
+			}
+		} else {
+			http.Error(w, message, status)
+		}
+	}
+	requestContext := r.Context()
+	var compactDeadline time.Time
+	if compact != nil {
+		budget, grace := s.compactProxyTimeout, s.compactWriteGrace
+		if budget <= 0 {
+			budget = proxyHTTPTimeout
+		}
+		if grace <= 0 {
+			grace = compactTerminalWriteGrace
+		}
+		var cancel context.CancelFunc
+		var deadlineErr error
+		requestContext, cancel, compactDeadline, deadlineErr = compactRequestDeadline(w, r, budget, grace)
+		if deadlineErr != nil {
+			proxyError(http.StatusInternalServerError, "compact response deadlines are unavailable")
+			return
+		}
+		defer cancel()
 	}
 	streamRequest := supportsCapability(session, "proxy.http-request-stream-v1")
 	var body []byte
@@ -1281,7 +1351,7 @@ func (s *Server) proxyHTTPForTarget(w http.ResponseWriter, r *http.Request, targ
 	if cookieHeader := cookieJar.requestHeader(r.URL.Path, r.Header.Get("Cookie")); cookieHeader != "" {
 		headers["Cookie"] = cookieHeader
 	}
-	if requiresBrowserCompatibility(r.URL.Path) {
+	if requiresBrowserCompatibility(r.URL.Path) || compact != nil {
 		headers["Accept-Encoding"] = "identity"
 	}
 	// Keep DSH control/data endpoints on the proven buffered transport. Stream
@@ -1289,36 +1359,76 @@ func (s *Server) proxyHTTPForTarget(w http.ResponseWriter, r *http.Request, targ
 	// and cannot affect the remote mux or settings/session boot sequence.
 	streamResponse := supportsCapability(session, "proxy.http-stream-v1") && isSafeStreamAssetRequest(r)
 	stream := newProxyStream()
-	s.pendingMu.Lock()
-	s.pending[requestID] = stream
-	s.pendingMu.Unlock()
-	defer func() { s.pendingMu.Lock(); delete(s.pending, requestID); s.pendingMu.Unlock() }()
+	if err := s.registerPendingStream(session, requestID, stream); err != nil {
+		proxyError(http.StatusBadGateway, err.Error())
+		return
+	}
+	defer s.unregisterPendingStream(requestID, stream)
+	uploadContext := requestContext
+	stopUploadWatch := func() {}
+	if streamRequest && r.Body != nil {
+		uploadContext, stopUploadWatch = watchProxyUpload(requestContext, w, r, stream)
+		defer stopUploadWatch()
+	}
 	payload := proxyRequest{Type: "proxy_request", RequestID: requestID, InstanceID: instanceID, Method: r.Method, Path: r.URL.RequestURI(), Headers: headers, Body: base64.StdEncoding.EncodeToString(body), Bootstrap: bootstrap, BinaryResponse: supportsCapability(session, "proxy.binary-response-v1"), StreamResponse: streamResponse, StreamRequest: streamRequest}
 	if streamRequest {
 		payload.Type = "proxy_request_start"
 		payload.Body = ""
 	}
-	if err := s.sendProxyRequest(r.Context(), session, payload, r.Body, streamRequest); err != nil {
+	sendErr := s.sendProxyRequest(uploadContext, session, payload, r.Body, streamRequest)
+	stopUploadWatch()
+	if err := sendErr; err != nil {
 		s.logger.Warn("proxy request send failed", "agentId", agentID, "instanceId", instanceID, "requestId", requestID, "error", err)
-		http.Error(w, "proxy send failed: "+err.Error(), http.StatusBadGateway)
+		if r.Context().Err() != nil {
+			s.cancelProxyRequest(session, requestID, instanceID, "client_disconnected")
+		} else if errors.Is(requestContext.Err(), context.DeadlineExceeded) {
+			s.cancelProxyRequest(session, requestID, instanceID, "proxy_timeout")
+			proxyError(http.StatusGatewayTimeout, "proxy timeout")
+		} else {
+			s.cancelProxyRequest(session, requestID, instanceID, "request_send_failed")
+			proxyError(http.StatusBadGateway, "proxy send failed: "+err.Error())
+		}
 		return
 	}
 	var response proxyResponse
-	select {
-	case response = <-stream.headers:
-	case err := <-stream.errors:
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
-	case <-r.Context().Done():
-		s.cancelProxyRequest(session, requestID, instanceID, "client_disconnected")
-		return
-	case <-time.After(proxyHTTPTimeout):
-		http.Error(w, "proxy timeout", http.StatusGatewayTimeout)
-		return
+	var heartbeat <-chan time.Time
+	if compact != nil {
+		ticker := time.NewTicker(compact.interval)
+		defer ticker.Stop()
+		heartbeat = ticker.C
+	}
+	waitBudget := proxyHTTPTimeout
+	if compact != nil {
+		waitBudget = time.Until(compactDeadline)
+	}
+	deadline := time.NewTimer(waitBudget)
+	defer deadline.Stop()
+waitResponse:
+	for {
+		select {
+		case response = <-stream.headers:
+			break waitResponse
+		case err := <-stream.errors:
+			proxyError(http.StatusBadGateway, err.Error())
+			s.logger.Warn("proxy response failed", "requestId", requestID, "error", err)
+			return
+		case <-heartbeat:
+			if err := compact.writeHeartbeat(w); err != nil {
+				s.cancelProxyRequest(session, requestID, instanceID, "response_write_failed")
+				return
+			}
+		case <-r.Context().Done():
+			s.cancelProxyRequest(session, requestID, instanceID, "client_disconnected")
+			return
+		case <-deadline.C:
+			s.cancelProxyRequest(session, requestID, instanceID, "proxy_timeout")
+			proxyError(http.StatusGatewayTimeout, "proxy timeout")
+			return
+		}
 	}
 	if response.Error != "" {
 		s.logger.Warn("proxy response error", "agentId", agentID, "instanceId", instanceID, "requestId", requestID, "path", r.URL.RequestURI(), "error", response.Error)
-		http.Error(w, response.Error, http.StatusBadGateway)
+		proxyError(http.StatusBadGateway, response.Error)
 		return
 	}
 	locationSessionID := sessionID
@@ -1336,22 +1446,31 @@ func (s *Server) proxyHTTPForTarget(w http.ResponseWriter, r *http.Request, targ
 	if status == 0 {
 		status = http.StatusBadGateway
 	}
-	for k, v := range response.Headers {
-		if !isHopHeader(k) {
-			w.Header().Set(k, v)
+	if compact != nil && compact.started && len(response.SetCookies) > 0 {
+		// A browser cannot apply Set-Cookie after headers were flushed. Do not
+		// mutate the Manager jar either: fail explicitly instead of splitting
+		// authentication state between the browser and its upstream session.
+		proxyError(http.StatusBadGateway, "upstream command changed cookies after keepalive")
+		return
+	}
+	if compact == nil || !compact.started {
+		for k, v := range response.Headers {
+			if !isHopHeader(k) {
+				w.Header().Set(k, v)
+			}
 		}
-	}
-	cookieJar.apply(response.SetCookies, r.URL.Path)
-	cookieScopeID := target.sessionID
-	if cookieScopeID == "" {
-		cookieScopeID = sessionID
-	}
-	for _, cookie := range response.SetCookies {
-		if scoped := scopeProxySetCookie(cookie, cookieScopeID, r.URL.Path); scoped != "" {
-			w.Header().Add("Set-Cookie", scoped)
+		cookieJar.apply(response.SetCookies, r.URL.Path)
+		cookieScopeID := target.sessionID
+		if cookieScopeID == "" {
+			cookieScopeID = sessionID
 		}
+		for _, cookie := range response.SetCookies {
+			if scoped := scopeProxySetCookie(cookie, cookieScopeID, r.URL.Path); scoped != "" {
+				w.Header().Add("Set-Cookie", scoped)
+			}
+		}
+		applyProxyCacheHeaders(w, r, status, len(response.SetCookies) > 0)
 	}
-	applyProxyCacheHeaders(w, r, status, len(response.SetCookies) > 0)
 	if streamResponse {
 		// A stream start commits headers. Never synthesize Content-Length: chunks
 		// are forwarded as received and net/http selects its safe final framing.
@@ -1383,7 +1502,7 @@ func (s *Server) proxyHTTPForTarget(w http.ResponseWriter, r *http.Request, targ
 	} else {
 		data, err = base64.StdEncoding.DecodeString(response.Body)
 		if err != nil {
-			http.Error(w, "invalid proxy response body", http.StatusBadGateway)
+			proxyError(http.StatusBadGateway, "invalid proxy response body")
 			return
 		}
 	}
@@ -1396,6 +1515,12 @@ func (s *Server) proxyHTTPForTarget(w http.ResponseWriter, r *http.Request, targ
 		if s.rewrittenJSCache.serve(w, r, rewrittenJSCacheKey(target, r)) {
 			return
 		}
+	}
+	if compact != nil {
+		if err := compact.finish(w, response, data); err != nil {
+			s.cancelProxyRequest(session, requestID, instanceID, "response_write_failed")
+		}
+		return
 	}
 	w.Header().Del("Content-Length")
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))

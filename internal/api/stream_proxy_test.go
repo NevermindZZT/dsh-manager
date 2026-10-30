@@ -40,6 +40,32 @@ func enrollAndConnect(t *testing.T, ts *httptest.Server, srv *Server, pairingCod
 	if err := agent.Write(context.Background(), websocket.MessageText, register); err != nil {
 		t.Fatal(err)
 	}
+	// Writing the frame does not mean the server has applied its capabilities.
+	// Wait for the observed state, rather than racing the first proxied request.
+	deadline := time.NewTimer(3 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for {
+		srv.sessionsMu.RLock()
+		live := srv.sessions[enrolled.AgentID]
+		srv.sessionsMu.RUnlock()
+		ready := false
+		if live != nil {
+			live.metadataMu.RLock()
+			ready = strings.Join(live.capabilities, "\x00") == strings.Join(normalizeCapabilities(caps), "\x00")
+			live.metadataMu.RUnlock()
+		}
+		if ready {
+			break
+		}
+		select {
+		case <-tick.C:
+		case <-deadline.C:
+			agent.CloseNow()
+			t.Fatal("Agent capabilities were not applied before proxy test")
+		}
+	}
 	return agent, enrolled.AgentID
 }
 

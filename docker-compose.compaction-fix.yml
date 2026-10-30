@@ -1,0 +1,8 @@
+services:
+  dsh-manager:
+    # Explicit local fix image: do not silently pull the unchanged latest image.
+    image: dsh-manager:compaction-fix
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: Dockerfile
