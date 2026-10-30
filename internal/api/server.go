@@ -141,6 +141,8 @@ func NewServer(cfg config.Config, db *storage.DB, logger *slog.Logger) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /app.js", s.dashboardAsset)
+	mux.HandleFunc("GET /favicon.svg", s.dashboardAsset)
+	mux.HandleFunc("GET /favicon.ico", s.dashboardFavicon)
 	mux.HandleFunc("GET /manager", s.dashboard)
 	mux.HandleFunc("/dsh/{sessionId}", s.proxySession)
 	mux.HandleFunc("/dsh/{sessionId}/{path...}", s.proxySession)

@@ -9,7 +9,7 @@ import (
 	"github.com/NevermindZZT/dsh-manager/internal/version"
 )
 
-//go:embed web/index.html web/app.js
+//go:embed web/index.html web/app.js web/favicon.svg
 var dashboard embed.FS
 
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
@@ -37,4 +37,20 @@ func (s *Server) dashboardAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.FileServer(http.FS(root)).ServeHTTP(w, r)
+}
+
+func (s *Server) dashboardFavicon(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "image/svg+xml")
+	root, err := fs.Sub(dashboard, "web")
+	if err != nil {
+		http.Error(w, "dashboard unavailable", http.StatusInternalServerError)
+		return
+	}
+	data, err := fs.ReadFile(root, "favicon.svg")
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	_, _ = w.Write(data)
 }

@@ -33,4 +33,16 @@ func TestDashboardServesIndex(t *testing.T) {
 	if jsRec.Code != 200 || !strings.Contains(jsRec.Body.String(), "loginForm") {
 		t.Fatalf("dashboard app.js not served: status=%d", jsRec.Code)
 	}
+	svgReq := httptest.NewRequest("GET", "/favicon.svg", nil)
+	svgRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(svgRec, svgReq)
+	if svgRec.Code != 200 || !strings.Contains(svgRec.Body.String(), "<svg") || !strings.Contains(svgRec.Header().Get("Content-Type"), "image/svg+xml") {
+		t.Fatalf("favicon.svg not served: status=%d content-type=%s", svgRec.Code, svgRec.Header().Get("Content-Type"))
+	}
+	icoReq := httptest.NewRequest("GET", "/favicon.ico", nil)
+	icoRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(icoRec, icoReq)
+	if icoRec.Code != 200 || !strings.Contains(icoRec.Body.String(), "<svg") || !strings.Contains(icoRec.Header().Get("Content-Type"), "image/svg+xml") {
+		t.Fatalf("favicon.ico not served: status=%d content-type=%s", icoRec.Code, icoRec.Header().Get("Content-Type"))
+	}
 }
