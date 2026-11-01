@@ -32,3 +32,14 @@ func TestRequiresBrowserCompatibility(t *testing.T) {
 		t.Fatal("non-JavaScript asset must preserve compression")
 	}
 }
+
+func TestInjectBrowserCompatibilityInjectsRemoteDownloadScriptIntoHTML(t *testing.T) {
+	html := []byte(`<!doctype html><html><head><title>Test</title></head><body></body></html>`)
+	got := string(injectBrowserCompatibility(map[string]string{"Content-Type": "text/html"}, html))
+	if !strings.Contains(got, "__dshRemoteDownload") || !strings.Contains(got, "dsh-dl-btn") {
+		t.Fatalf("remote download script was not injected into HTML: %s", got)
+	}
+	if !strings.HasSuffix(got, "</body></html>") {
+		t.Fatalf("expected script before </body>, got: %s", got)
+	}
+}

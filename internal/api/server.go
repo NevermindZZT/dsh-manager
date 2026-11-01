@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -14,6 +15,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,7 +38,7 @@ const (
 	proxyWebSocketHeartbeatEvery   = 20 * time.Second
 	proxyWebSocketHeartbeatTimeout = 5 * time.Second
 	proxyChunkSize                 = 64 << 10
-	proxyRequestMaxBytes           = 16 << 20
+	proxyRequestMaxBytes           = 64 << 20
 	proxyStreamQueue               = 8
 	tunnelQueue                    = 32
 	proxyHTTPMaxInFlight           = 16
@@ -1803,6 +1805,14 @@ waitResponse:
 				w.Header().Set(k, v)
 			}
 		}
+		if r.URL.Query().Get("download") == "1" || r.URL.Query().Get("action") == "download" || strings.HasSuffix(r.URL.Path, "/download") {
+			filePath := r.URL.Query().Get("path")
+			fileName := filepath.Base(filePath)
+			if fileName != "" && fileName != "." && fileName != "/" {
+				w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"; filename*=UTF-8''%s`,
+					url.PathEscape(fileName), url.PathEscape(fileName)))
+			}
+		}
 		cookieJar.apply(response.SetCookies, r.URL.Path)
 		cookieScopeID := target.sessionID
 		if cookieScopeID == "" {
@@ -1852,6 +1862,9 @@ waitResponse:
 	}
 	originalData := data
 	data = injectBrowserCompatibility(response.Headers, data)
+	if !bytes.Equal(originalData, data) {
+		w.Header().Del("Content-Encoding")
+	}
 	if cacheableRewrittenJS(r, status, response.Headers, len(response.SetCookies) > 0, !bytes.Equal(originalData, data)) {
 		s.rewrittenJSCache.add(rewrittenJSCacheKey(target, r), response.Headers, data)
 		// Serve the freshly stored variant too, so gzip-capable browsers do not
@@ -1882,10 +1895,23 @@ func injectBrowserCompatibility(headers map[string]string, data []byte) []byte {
 			contentEncoding = value
 		}
 	}
+	contentTypeLower := strings.ToLower(contentType)
+	if strings.Contains(contentTypeLower, "text/html") && strings.EqualFold(contentEncoding, "gzip") {
+		gr, err := gzip.NewReader(bytes.NewReader(data))
+		if err == nil {
+			decompressed, err := io.ReadAll(gr)
+			_ = gr.Close()
+			if err == nil {
+				data = decompressed
+				contentEncoding = ""
+				delete(headers, "Content-Encoding")
+				delete(headers, "content-encoding")
+			}
+		}
+	}
 	if contentEncoding != "" {
 		return data
 	}
-	contentTypeLower := strings.ToLower(contentType)
 	if strings.Contains(contentTypeLower, "javascript") || strings.Contains(contentTypeLower, "ecmascript") {
 		script := string(data)
 		// Treat an authenticated manager tunnel as the same privileged surface as
@@ -1902,16 +1928,11 @@ func injectBrowserCompatibility(headers map[string]string, data []byte) []byte {
 		return data
 	}
 	lower := strings.ToLower(string(data))
-	head := strings.Index(lower, "<head")
-	if head < 0 {
-		return data
+	insertAt := strings.LastIndex(lower, "</body>")
+	if insertAt < 0 {
+		insertAt = len(data)
 	}
-	end := strings.Index(lower[head:], ">")
-	if end < 0 {
-		return data
-	}
-	insertAt := head + end + 1
-	const script = `<script>(function(){try{if(window.crypto&&typeof window.crypto.randomUUID!=="function"&&window.crypto.getRandomValues){var f=function(){var b=new Uint8Array(16);window.crypto.getRandomValues(b);b[6]=(b[6]&15)|64;b[8]=(b[8]&63)|128;var h=Array.prototype.map.call(b,function(x){return("0"+x.toString(16)).slice(-2)}).join("");return h.slice(0,8)+"-"+h.slice(8,12)+"-"+h.slice(12,16)+"-"+h.slice(16,20)+"-"+h.slice(20)};try{Object.defineProperty(window.crypto,"randomUUID",{value:f,configurable:true})}catch(e){}}}catch(e){}})();</script>`
+	const script = `<script>(function(){if(window.__dshDlInit)return;window.__dshDlInit=true;window.__dshRemoteDownload=function(p,n){if(!p)return;var name=n||p.split(/[\/\\]/).pop();var a=document.createElement('a');a.href='api/file?path='+encodeURIComponent(p)+'&download=1';a.download=name;a.target='_blank';a.style.display='none';document.body.appendChild(a);a.click();setTimeout(function(){if(a.parentNode)a.parentNode.removeChild(a);},1000);};document.addEventListener('click',function(e){var dl=e.target.closest('[data-dsh-dl]');if(dl){e.preventDefault();e.stopPropagation();window.__dshRemoteDownload(dl.getAttribute('data-path'),dl.getAttribute('data-name'));return;}var card=e.target.closest('[data-presented-file]');var actBtn=e.target.closest('button[data-open-target], button[data-open-path-open], button[data-open-path]');if(card&&actBtn){e.preventDefault();e.stopPropagation();var pb=card.querySelector('button[title]');var nm=card.querySelector('[class*="fileName"]');var p=pb?pb.getAttribute('title'):null;var n=nm?nm.textContent.trim():null;if(p)window.__dshRemoteDownload(p,n);return;}var ot=e.target.closest('[data-open-target="file"] button, [data-open-path-unpreviewable] button');if(ot){e.preventDefault();e.stopPropagation();var hb=document.querySelector('[data-open-target="file"] button[title]')||document.querySelector('[data-open-target="file"] [title]');var tp=hb?hb.getAttribute('title'):null;if(tp)window.__dshRemoteDownload(tp);return;}},true);var st=document.createElement('style');st.textContent='.dsh-dl-btn{display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:5px;font-size:12px;font-weight:500;color:inherit;background:rgba(125,125,125,0.12);border:1px solid rgba(125,125,125,0.2);cursor:pointer;text-decoration:none;transition:all 0.15s;vertical-align:middle;margin-left:6px}.dsh-dl-btn:hover{background:rgba(59,130,246,0.15);border-color:#3b82f6;color:#3b82f6}.dsh-dl-btn svg{width:12px;height:12px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}.dsh-dl-hero{display:flex;justify-content:center;margin:16px 0}.dsh-dl-hero-btn{display:inline-flex;align-items:center;gap:8px;padding:8px 18px;border-radius:8px;font-size:13px;font-weight:600;background:#3b82f6;color:#fff!important;border:none;cursor:pointer;box-shadow:0 2px 8px rgba(59,130,246,0.3);transition:background 0.15s}.dsh-dl-hero-btn:hover{background:#2563eb}.dsh-dl-hero-btn svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:2.2}';document.head.appendChild(st);function makeBtn(p,n,hero){var b=document.createElement('button');b.type='button';b.className=hero?'dsh-dl-hero-btn':'dsh-dl-btn';b.setAttribute('data-dsh-dl','1');b.setAttribute('data-path',p);b.setAttribute('data-name',n||'');b.setAttribute('title','下载到本地 ('+(n||p)+')');b.innerHTML='<svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg><span>下载</span>';return b;}function scan(){var cards=document.querySelectorAll('[data-presented-file]');for(var i=0;i<cards.length;i++){var c=cards[i];if(c.querySelector('[data-dsh-dl]'))continue;var pb=c.querySelector('button[title]');var ne=c.querySelector('[class*="fileName"]');var p=pb?pb.getAttribute('title'):null;var n=ne?ne.textContent.trim():null;if(!p)continue;var act=c.querySelector('[class*="actions"]')||c.querySelector('[class*="details"]');if(act)act.appendChild(makeBtn(p,n,false));}var ots=document.querySelectorAll('[data-open-target="file"]');for(var k=0;k<ots.length;k++){var ot=ots[k];if(ot.querySelector('[data-dsh-dl]'))continue;var tb=ot.querySelector('button[title]')||ot.querySelector('[title]');var tp=tb?tb.getAttribute('title'):null;if(tp)ot.appendChild(makeBtn(tp,null,false));}var unps=document.querySelectorAll('[data-open-path-unpreviewable]');for(var j=0;j<unps.length;j++){var unp=unps[j];if(unp.querySelector('[data-dsh-dl]'))continue;var hb=document.querySelector('[data-open-target="file"] button[title]')||document.querySelector('[data-open-target="file"] [title]');var up=hb?hb.getAttribute('title'):null;if(up){var w=document.createElement('div');w.className='dsh-dl-hero';w.appendChild(makeBtn(up,null,true));unp.appendChild(w);}}}if(window.MutationObserver){new MutationObserver(scan).observe(document.documentElement,{childList:true,subtree:true});}setInterval(scan,1000);scan();})();</script>`
 	return append(append(append([]byte{}, data[:insertAt]...), []byte(script)...), data[insertAt:]...)
 }
 
@@ -1941,7 +1962,8 @@ func isSafeStreamAssetRequest(r *http.Request) bool {
 }
 
 func requiresBrowserCompatibility(path string) bool {
-	return strings.HasSuffix(strings.ToLower(path), ".js")
+	lower := strings.ToLower(path)
+	return strings.HasSuffix(lower, ".js") || lower == "" || lower == "/" || strings.HasSuffix(lower, ".html") || strings.HasSuffix(lower, ".htm")
 }
 
 func isImmutableAssetPath(path string) bool {
