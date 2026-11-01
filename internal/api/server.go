@@ -40,7 +40,23 @@ const (
 	proxyStreamQueue               = 8
 	tunnelQueue                    = 32
 	proxyHTTPMaxInFlight           = 16
+	adminSessionDuration           = 30 * 24 * time.Hour
+	adminSessionCookieMaxAge       = 30 * 86400
 )
+
+func isRequestSecure(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	if strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") ||
+		strings.EqualFold(r.Header.Get("X-Forwarded-Scheme"), "https") {
+		return true
+	}
+	if strings.Contains(strings.ToLower(r.Header.Get("Forwarded")), "proto=https") {
+		return true
+	}
+	return false
+}
 
 type Server struct {
 	cfg                      config.Config
@@ -136,6 +152,9 @@ type heartbeatRequest struct {
 }
 
 func NewServer(cfg config.Config, db *storage.DB, logger *slog.Logger) *Server {
+	if db != nil {
+		_ = db.CleanExpiredAuthSessions()
+	}
 	return &Server{cfg: cfg, db: db, logger: logger, pairingCode: cfg.PairingCode, sessions: make(map[string]*agentSession), pending: make(map[string]*proxyStream), tunnels: make(map[string]chan agentMessage), webTargets: make(map[string]webTarget), authSessions: make(map[string]time.Time), rewrittenJSCache: newRewrittenJSCache(rewrittenJSCacheBytes)}
 }
 
@@ -212,20 +231,34 @@ func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sessionID := randomHex(32)
-	expires := time.Now().Add(24 * time.Hour)
+	expires := time.Now().Add(adminSessionDuration)
 	s.sessionsAuthMu.Lock()
 	s.authSessions[sessionID] = expires
 	s.sessionsAuthMu.Unlock()
-	http.SetCookie(w, &http.Cookie{Name: "dsh-session", Value: sessionID, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: r.TLS != nil, MaxAge: 86400})
+	if s.db != nil {
+		_ = s.db.SaveAuthSession(sessionID, req.Username, expires)
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     "dsh-session",
+		Value:    sessionID,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   isRequestSecure(r),
+		MaxAge:   adminSessionCookieMaxAge,
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "username": s.cfg.AdminUsername, "version": version.Version, "expiresAt": expires})
 }
 func (s *Server) authLogout(w http.ResponseWriter, r *http.Request) {
-	if c, err := r.Cookie("dsh-session"); err == nil {
+	if c, err := r.Cookie("dsh-session"); err == nil && c.Value != "" {
 		s.sessionsAuthMu.Lock()
 		delete(s.authSessions, c.Value)
 		s.sessionsAuthMu.Unlock()
+		if s.db != nil {
+			_ = s.db.DeleteAuthSession(c.Value)
+		}
 	}
-	http.SetCookie(w, &http.Cookie{Name: "dsh-session", Value: "", Path: "/", MaxAge: -1, HttpOnly: true})
+	http.SetCookie(w, &http.Cookie{Name: "dsh-session", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: isRequestSecure(r), SameSite: http.SameSiteLaxMode})
 	clearTargetCookie(w)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -242,18 +275,49 @@ func (s *Server) isAuthenticated(r *http.Request) bool {
 		return true
 	}
 	c, err := r.Cookie("dsh-session")
-	if err != nil {
+	if err != nil || c.Value == "" {
 		return false
 	}
 	now := time.Now()
 	s.sessionsAuthMu.Lock()
 	expires, ok := s.authSessions[c.Value]
+	if ok && now.Before(expires) {
+		// Sliding renewal: extend session if remaining validity is under 15 days
+		if time.Until(expires) < 15*24*time.Hour {
+			newExpires := now.Add(adminSessionDuration)
+			s.authSessions[c.Value] = newExpires
+			if s.db != nil {
+				_ = s.db.TouchAuthSession(c.Value, newExpires)
+			}
+		}
+		s.sessionsAuthMu.Unlock()
+		return true
+	}
 	if ok && now.After(expires) {
 		delete(s.authSessions, c.Value)
-		ok = false
+		if s.db != nil {
+			_ = s.db.DeleteAuthSession(c.Value)
+		}
 	}
 	s.sessionsAuthMu.Unlock()
-	return ok
+
+	// If missing from memory (e.g. process restarted), check persistent SQLite
+	if s.db != nil {
+		rec, err := s.db.GetAuthSession(c.Value)
+		if err == nil && rec != nil {
+			if now.Before(rec.ExpiresAt) {
+				newExpires := now.Add(adminSessionDuration)
+				s.sessionsAuthMu.Lock()
+				s.authSessions[c.Value] = newExpires
+				s.sessionsAuthMu.Unlock()
+				_ = s.db.TouchAuthSession(c.Value, newExpires)
+				return true
+			}
+			_ = s.db.DeleteAuthSession(c.Value)
+		}
+	}
+
+	return false
 }
 
 func (s *Server) adminPairing(w http.ResponseWriter, r *http.Request) {
@@ -928,7 +992,7 @@ func (s *Server) openInstance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sessionID := s.createOrReuseTargetSession(agentID, instanceID)
-	http.SetCookie(w, &http.Cookie{Name: "dsh-target", Value: sessionID, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: 86400})
+	http.SetCookie(w, &http.Cookie{Name: "dsh-target", Value: sessionID, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: isRequestSecure(r), MaxAge: adminSessionCookieMaxAge})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "url": "/dsh/" + sessionID + "/"})
 }
 
@@ -1114,7 +1178,8 @@ func (s *Server) directInstanceWithValues(w http.ResponseWriter, r *http.Request
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		MaxAge:   86400,
+		Secure:   isRequestSecure(r),
+		MaxAge:   adminSessionCookieMaxAge,
 	})
 	http.Redirect(w, r, "/dsh/"+sessionID+"/", http.StatusFound)
 }
@@ -1243,7 +1308,7 @@ func (s *Server) proxySession(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/manager?error=session_expired", http.StatusFound)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: "dsh-target", Value: sessionID, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: 86400})
+	http.SetCookie(w, &http.Cookie{Name: "dsh-target", Value: sessionID, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: isRequestSecure(r), MaxAge: adminSessionCookieMaxAge})
 	copyReq := withTargetSession(r.Clone(r.Context()), sessionID)
 	copyReq.Header.Set("Cookie", withTargetCookie(copyReq.Header.Get("Cookie"), sessionID))
 	prefix := "/dsh/" + sessionID
@@ -1262,7 +1327,7 @@ func (s *Server) proxySession(w http.ResponseWriter, r *http.Request) {
 }
 
 func clearTargetCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{Name: "dsh-target", Value: "", Path: "/", MaxAge: -1, HttpOnly: true})
+	http.SetCookie(w, &http.Cookie{Name: "dsh-target", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode})
 }
 
 func (s *Server) dashboardOrProxy(w http.ResponseWriter, r *http.Request) {

@@ -104,6 +104,13 @@ CREATE TABLE IF NOT EXISTS web_targets (
   instance_id TEXT NOT NULL,
   created_at TEXT NOT NULL,
   last_seen_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS auth_sessions (
+  id TEXT PRIMARY KEY,
+  username TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL
 );`)
 	if err != nil {
 		return err
@@ -397,4 +404,55 @@ func (db *DB) FindRecentWebTarget(agentID, instanceID string) (*WebTargetRecord,
 	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdStr)
 	rec.LastSeenAt, _ = time.Parse(time.RFC3339Nano, lastSeenStr)
 	return &rec, nil
+}
+
+type AuthSessionRecord struct {
+	ID         string    `json:"id"`
+	Username   string    `json:"username"`
+	CreatedAt  time.Time `json:"createdAt"`
+	ExpiresAt  time.Time `json:"expiresAt"`
+	LastSeenAt time.Time `json:"lastSeenAt"`
+}
+
+func (db *DB) SaveAuthSession(id, username string, expiresAt time.Time) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	exp := expiresAt.UTC().Format(time.RFC3339Nano)
+	_, err := db.sql.Exec(`INSERT INTO auth_sessions(id, username, created_at, expires_at, last_seen_at)
+VALUES(?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET expires_at=excluded.expires_at, last_seen_at=excluded.last_seen_at`, id, username, now, exp, now)
+	return err
+}
+
+func (db *DB) GetAuthSession(id string) (*AuthSessionRecord, error) {
+	row := db.sql.QueryRow(`SELECT id, username, created_at, expires_at, last_seen_at FROM auth_sessions WHERE id=?`, id)
+	var rec AuthSessionRecord
+	var createdStr, expStr, lastSeenStr string
+	if err := row.Scan(&rec.ID, &rec.Username, &createdStr, &expStr, &lastSeenStr); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdStr)
+	rec.ExpiresAt, _ = time.Parse(time.RFC3339Nano, expStr)
+	rec.LastSeenAt, _ = time.Parse(time.RFC3339Nano, lastSeenStr)
+	return &rec, nil
+}
+
+func (db *DB) TouchAuthSession(id string, newExpiresAt time.Time) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	exp := newExpiresAt.UTC().Format(time.RFC3339Nano)
+	_, err := db.sql.Exec(`UPDATE auth_sessions SET expires_at=?, last_seen_at=? WHERE id=?`, exp, now, id)
+	return err
+}
+
+func (db *DB) DeleteAuthSession(id string) error {
+	_, err := db.sql.Exec(`DELETE FROM auth_sessions WHERE id=?`, id)
+	return err
+}
+
+func (db *DB) CleanExpiredAuthSessions() error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := db.sql.Exec(`DELETE FROM auth_sessions WHERE expires_at < ?`, now)
+	return err
 }

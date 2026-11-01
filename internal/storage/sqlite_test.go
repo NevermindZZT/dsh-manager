@@ -1,6 +1,9 @@
 package storage
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestUpsertHeartbeatReconcilesRemovedInstances(t *testing.T) {
 	db, err := Open(t.TempDir() + "/manager.db")
@@ -94,5 +97,78 @@ func TestWebTargetPersistence(t *testing.T) {
 	}
 	if rec != nil {
 		t.Fatalf("expected nil after delete, got %#v", rec)
+	}
+}
+
+func TestAuthSessionPersistence(t *testing.T) {
+	db, err := Open(t.TempDir() + "/manager.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// 1. Initially non-existent
+	rec, err := db.GetAuthSession("non-existent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec != nil {
+		t.Fatalf("expected nil, got %#v", rec)
+	}
+
+	// 2. Save
+	exp := time.Now().Add(30 * 24 * time.Hour)
+	if err := db.SaveAuthSession("sess-1", "admin", exp); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. Get
+	rec, err = db.GetAuthSession("sess-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec == nil || rec.Username != "admin" || rec.ID != "sess-1" {
+		t.Fatalf("unexpected auth session: %#v", rec)
+	}
+
+	// 4. Touch (slide expiration)
+	newExp := time.Now().Add(60 * 24 * time.Hour)
+	if err := db.TouchAuthSession("sess-1", newExp); err != nil {
+		t.Fatal(err)
+	}
+	rec, err = db.GetAuthSession("sess-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.ExpiresAt.Before(exp) {
+		t.Fatalf("expected extended expiration, got %v", rec.ExpiresAt)
+	}
+
+	// 5. Clean expired
+	pastExp := time.Now().Add(-time.Hour)
+	if err := db.SaveAuthSession("sess-expired", "admin", pastExp); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CleanExpiredAuthSessions(); err != nil {
+		t.Fatal(err)
+	}
+	rec, err = db.GetAuthSession("sess-expired")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec != nil {
+		t.Fatal("expected expired session to be cleaned up")
+	}
+
+	// 6. Delete
+	if err := db.DeleteAuthSession("sess-1"); err != nil {
+		t.Fatal(err)
+	}
+	rec, err = db.GetAuthSession("sess-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec != nil {
+		t.Fatal("expected session to be deleted")
 	}
 }
