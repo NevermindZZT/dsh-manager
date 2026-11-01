@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"net/http"
@@ -146,6 +147,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /manager", s.dashboard)
 	mux.HandleFunc("/dsh/{sessionId}", s.proxySession)
 	mux.HandleFunc("/dsh/{sessionId}/{path...}", s.proxySession)
+	mux.HandleFunc("GET /instances/{agentId}/{instanceId}", s.directInstance)
+	mux.HandleFunc("GET /instances/{agentId}/{instanceId}/", s.directInstance)
+	mux.HandleFunc("GET /instances/{agentId}", s.directAgent)
+	mux.HandleFunc("GET /instances/{agentId}/", s.directAgent)
 	mux.HandleFunc("GET /api/v1/auth/me", s.authMe)
 	mux.HandleFunc("POST /api/v1/auth/login", s.authLogin)
 	mux.HandleFunc("POST /api/v1/auth/logout", s.authLogout)
@@ -922,28 +927,97 @@ func (s *Server) openInstance(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "error": "dsh instance is not ready", "state": current.State, "urlAvailable": current.URLAvailable})
 		return
 	}
-	bootstrapPending := s.startupAvailable(agentID, instanceID)
-	sessionID := "dsh-" + randomHex(16)
-	s.webTargetsMu.Lock()
-	s.webTargets[sessionID] = webTarget{AgentID: agentID, InstanceID: instanceID, ExpiresAt: time.Now().Add(time.Hour), BootstrapPending: bootstrapPending, sessionID: sessionID, cookies: newProxyCookieJar()}
-	s.webTargetsMu.Unlock()
-	http.SetCookie(w, &http.Cookie{Name: "dsh-target", Value: sessionID, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: 3600})
+	sessionID := s.createOrReuseTargetSession(agentID, instanceID)
+	http.SetCookie(w, &http.Cookie{Name: "dsh-target", Value: sessionID, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: 86400})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "url": "/dsh/" + sessionID + "/"})
+}
+
+func (s *Server) createOrReuseTargetSession(agentID, instanceID string) string {
+	now := time.Now()
+	bootstrapPending := s.startupAvailable(agentID, instanceID)
+	s.webTargetsMu.Lock()
+	defer s.webTargetsMu.Unlock()
+
+	for sid, t := range s.webTargets {
+		if t.AgentID == agentID && t.InstanceID == instanceID && now.Before(t.ExpiresAt) {
+			t.ExpiresAt = now.Add(24 * time.Hour)
+			if bootstrapPending {
+				t.BootstrapPending = true
+			}
+			s.webTargets[sid] = t
+			if s.db != nil {
+				_ = s.db.TouchWebTarget(sid)
+			}
+			return sid
+		}
+	}
+
+	sessionID := "dsh-" + randomHex(16)
+	target := webTarget{
+		AgentID:          agentID,
+		InstanceID:       instanceID,
+		ExpiresAt:        now.Add(24 * time.Hour),
+		BootstrapPending: bootstrapPending,
+		sessionID:        sessionID,
+		cookies:          newProxyCookieJar(),
+	}
+	s.webTargets[sessionID] = target
+	if s.db != nil {
+		_ = s.db.SaveWebTarget(sessionID, agentID, instanceID)
+	}
+	return sessionID
 }
 
 func (s *Server) targetForSession(sessionID string) (webTarget, bool) {
 	s.webTargetsMu.Lock()
 	defer s.webTargetsMu.Unlock()
 	target, ok := s.webTargets[sessionID]
-	if !ok || time.Now().After(target.ExpiresAt) {
-		return webTarget{}, false
+	now := time.Now()
+	if ok && now.Before(target.ExpiresAt) {
+		target.ExpiresAt = now.Add(24 * time.Hour)
+		target.sessionID = sessionID
+		if target.cookies == nil {
+			target.cookies = newProxyCookieJar()
+		}
+		s.webTargets[sessionID] = target
+		if s.db != nil {
+			_ = s.db.TouchWebTarget(sessionID)
+		}
+		return target, true
 	}
-	target.sessionID = sessionID
-	if target.cookies == nil {
-		target.cookies = newProxyCookieJar()
+
+	// Try restoring target mapping from persistent DB
+	if s.db != nil {
+		rec, err := s.db.GetWebTarget(sessionID)
+		if err == nil && rec != nil {
+			s.sessionsMu.RLock()
+			online := s.sessions[rec.AgentID] != nil
+			s.sessionsMu.RUnlock()
+			if online {
+				instances, err := s.db.ListInstances()
+				if err == nil {
+					for _, inst := range instances {
+						if inst.AgentID == rec.AgentID && inst.InstanceID == rec.InstanceID && inst.URLAvailable && strings.EqualFold(inst.State, "running") {
+							bootstrapPending := s.startupAvailable(rec.AgentID, rec.InstanceID)
+							revived := webTarget{
+								AgentID:          rec.AgentID,
+								InstanceID:       rec.InstanceID,
+								ExpiresAt:        now.Add(24 * time.Hour),
+								BootstrapPending: bootstrapPending,
+								sessionID:        sessionID,
+								cookies:          newProxyCookieJar(),
+							}
+							s.webTargets[sessionID] = revived
+							_ = s.db.TouchWebTarget(sessionID)
+							return revived, true
+						}
+					}
+				}
+			}
+		}
 	}
-	s.webTargets[sessionID] = target
-	return target, true
+
+	return webTarget{}, false
 }
 
 func (s *Server) consumeBootstrap(sessionID string) bool {
@@ -958,15 +1032,218 @@ func (s *Server) consumeBootstrap(sessionID string) bool {
 	return true
 }
 
-func (s *Server) proxySession(w http.ResponseWriter, r *http.Request) {
-	sessionID := r.PathValue("sessionId")
-	target, ok := s.targetForSession(sessionID)
-	if !ok {
-		clearTargetCookie(w)
-		s.dashboard(w, r)
+func (s *Server) directInstance(w http.ResponseWriter, r *http.Request) {
+	agentID := decodeRouteValue(r.PathValue("agentId"))
+	instanceID := decodeRouteValue(r.PathValue("instanceId"))
+	s.directInstanceWithValues(w, r, agentID, instanceID)
+}
+
+func (s *Server) directAgent(w http.ResponseWriter, r *http.Request) {
+	agentID := decodeRouteValue(r.PathValue("agentId"))
+	if agentID == "" {
+		http.NotFound(w, r)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: "dsh-target", Value: sessionID, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: 3600})
+	if !s.isAuthenticated(r) {
+		http.Redirect(w, r, "/manager?redirect="+url.QueryEscape(r.URL.RequestURI()), http.StatusFound)
+		return
+	}
+	instances, err := s.db.ListInstances()
+	if err != nil {
+		http.Error(w, "list instances failed", http.StatusInternalServerError)
+		return
+	}
+	var agentInstances []storage.Instance
+	for _, inst := range instances {
+		if inst.AgentID == agentID {
+			agentInstances = append(agentInstances, inst)
+		}
+	}
+	if len(agentInstances) == 1 {
+		s.directInstanceWithValues(w, r, agentID, agentInstances[0].InstanceID)
+		return
+	}
+	http.Redirect(w, r, "/manager", http.StatusFound)
+}
+
+func (s *Server) directInstanceWithValues(w http.ResponseWriter, r *http.Request, agentID, instanceID string) {
+	if agentID == "" || instanceID == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	if !s.isAuthenticated(r) {
+		returnURL := r.URL.RequestURI()
+		http.Redirect(w, r, "/manager?redirect="+url.QueryEscape(returnURL), http.StatusFound)
+		return
+	}
+
+	s.sessionsMu.RLock()
+	session := s.sessions[agentID]
+	s.sessionsMu.RUnlock()
+	if session == nil {
+		s.renderDirectInstanceMessage(w, r, agentID, instanceID, "Agent 离线", "电脑/Agent「"+agentID+"」当前未连接到 Manager，请确认客户端启动状态。")
+		return
+	}
+
+	instances, err := s.db.ListInstances()
+	if err != nil {
+		http.Error(w, "list instances failed", http.StatusInternalServerError)
+		return
+	}
+	var current *storage.Instance
+	for i := range instances {
+		if instances[i].AgentID == agentID && instances[i].InstanceID == instanceID {
+			current = &instances[i]
+			break
+		}
+	}
+	if current == nil || !current.URLAvailable || !strings.EqualFold(current.State, "running") {
+		stateText := "服务未就绪"
+		if current != nil && current.State != "" {
+			stateText = "状态：" + current.State
+		}
+		s.renderDirectInstanceMessage(w, r, agentID, instanceID, "实例未就绪", "DSH 实例「"+instanceID+"」尚未处于运行状态（"+stateText+"）。可在管理面板中查看或启动。")
+		return
+	}
+
+	sessionID := s.createOrReuseTargetSession(agentID, instanceID)
+	http.SetCookie(w, &http.Cookie{
+		Name:     "dsh-target",
+		Value:    sessionID,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   86400,
+	})
+	http.Redirect(w, r, "/dsh/"+sessionID+"/", http.StatusFound)
+}
+
+func (s *Server) renderDirectInstanceMessage(w http.ResponseWriter, r *http.Request, agentID, instanceID, title, message string) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusConflict)
+
+	escapedTitle := html.EscapeString(title)
+	escapedMsg := html.EscapeString(message)
+	escapedTarget := html.EscapeString(agentID + "/" + instanceID)
+
+	page := fmt.Sprintf(`<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>%s · dsh-manager</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <style>
+    :root {
+      --bg: #09090b;
+      --panel: #131316;
+      --text: #f4f4f5;
+      --muted: #a1a1aa;
+      --line: #27272a;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f8fafc;
+        --panel: #ffffff;
+        --text: #0f172a;
+        --muted: #64748b;
+        --line: #e2e8f0;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; display: grid; place-items: center;
+      background: var(--bg); color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      padding: 20px;
+    }
+    .card {
+      background: var(--panel); border: 1px solid var(--line);
+      border-radius: 16px; padding: 32px; max-width: 440px; width: 100%%;
+      text-align: center; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.1);
+    }
+    h2 { margin: 0 0 8px; font-size: 20px; font-weight: 600; }
+    .badge {
+      display: inline-block; font-size: 12px; font-family: monospace;
+      padding: 4px 8px; background: rgba(161,161,170,0.1); border-radius: 6px;
+      color: var(--muted); margin-bottom: 16px;
+    }
+    p { margin: 0 0 24px; color: var(--muted); font-size: 14px; line-height: 1.6; }
+    .actions { display: flex; gap: 12px; justify-content: center; }
+    .btn {
+      padding: 10px 18px; border-radius: 8px; font-size: 14px; font-weight: 500;
+      text-decoration: none; cursor: pointer; border: 1px solid var(--line);
+      background: transparent; color: var(--text); display: inline-flex; align-items: center;
+    }
+    .btn-primary { background: var(--primary); color: #fff; border-color: var(--primary); }
+    .btn-primary:hover { background: var(--primary-hover); }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>%s</h2>
+    <div class="badge">%s</div>
+    <p>%s</p>
+    <div class="actions">
+      <button class="btn btn-primary" onclick="window.location.reload()">重新连接</button>
+      <a class="btn" href="/manager">进入管理面板</a>
+    </div>
+  </div>
+</body>
+</html>`, escapedTitle, escapedTitle, escapedTarget, escapedMsg)
+
+	_, _ = w.Write([]byte(page))
+}
+
+func (s *Server) proxySession(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("sessionId")
+
+	// Trailing slash redirect for session root: /dsh/{sessionId} -> /dsh/{sessionId}/
+	if r.URL.Path == "/dsh/"+sessionID {
+		targetURL := "/dsh/" + sessionID + "/"
+		if r.URL.RawQuery != "" {
+			targetURL += "?" + r.URL.RawQuery
+		}
+		http.Redirect(w, r, targetURL, http.StatusTemporaryRedirect)
+		return
+	}
+
+	target, ok := s.targetForSession(sessionID)
+	if !ok {
+		// Check if URL was in format /dsh/{agentId}/{instanceId}...
+		prefix := "/dsh/" + sessionID
+		path := strings.TrimPrefix(r.URL.Path, prefix)
+		instPart := strings.TrimPrefix(path, "/")
+		if idx := strings.IndexByte(instPart, '/'); idx >= 0 {
+			instPart = instPart[:idx]
+		}
+		if instPart != "" && s.db != nil {
+			agentID := decodeRouteValue(sessionID)
+			instanceID := decodeRouteValue(instPart)
+			instances, err := s.db.ListInstances()
+			if err == nil {
+				for _, inst := range instances {
+					if inst.AgentID == agentID && inst.InstanceID == instanceID {
+						s.directInstanceWithValues(w, r, agentID, instanceID)
+						return
+					}
+				}
+			}
+		}
+
+		clearTargetCookie(w)
+		if !s.isAuthenticated(r) {
+			http.Redirect(w, r, "/manager?redirect="+url.QueryEscape(r.URL.RequestURI()), http.StatusFound)
+			return
+		}
+		http.Redirect(w, r, "/manager?error=session_expired", http.StatusFound)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: "dsh-target", Value: sessionID, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: 86400})
 	copyReq := withTargetSession(r.Clone(r.Context()), sessionID)
 	copyReq.Header.Set("Cookie", withTargetCookie(copyReq.Header.Get("Cookie"), sessionID))
 	prefix := "/dsh/" + sessionID

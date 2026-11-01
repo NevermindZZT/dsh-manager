@@ -15,6 +15,13 @@ var dashboard embed.FS
 
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
+	if s.isAuthenticated(r) {
+		redirect := r.URL.Query().Get("redirect")
+		if redirect != "" && strings.HasPrefix(redirect, "/") && !strings.HasPrefix(redirect, "//") {
+			http.Redirect(w, r, redirect, http.StatusFound)
+			return
+		}
+	}
 	root, err := fs.Sub(dashboard, "web")
 	if err != nil {
 		http.Error(w, "dashboard unavailable", http.StatusInternalServerError)

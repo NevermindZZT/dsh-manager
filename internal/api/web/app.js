@@ -83,6 +83,12 @@
     try {
       const result = await api("/api/v1/auth/login", { method: "POST", body: JSON.stringify({ username: $("username").value, password: $("password").value }) });
       $("password").value = "";
+      const params = new URLSearchParams(window.location.search);
+      const redirect = params.get("redirect");
+      if (redirect && redirect.startsWith("/") && !redirect.startsWith("//")) {
+        window.location.href = redirect;
+        return;
+      }
       showApp(result.username);
       await loadData();
     } catch (error) { $("loginError").textContent = error.message; }
@@ -146,7 +152,10 @@
       $("instanceCount").textContent = instances.length;
       $("runningCount").textContent = instances.filter(function (x) { return x.state === "running"; }).length;
       $("agents").innerHTML = agents.length ? agents.map(function (x) { var id = x.id || x.agentId || ""; return '<div class="instance"><div class="instance-head"><h3>' + esc(x.name) + '</h3><span class="pill ' + (x.online ? 'online' : 'offline') + '">' + (x.online ? '在线' : '离线') + '</span></div><code>' + esc(id) + '</code><span class="muted">' + esc(x.platform) + ' · ' + esc(x.agentType || 'launcher') + ' · ' + esc(x.launcherVersion || x.pluginVersion || '') + '</span><div class=actions><button class=danger data-action=revoke data-agent="' + escAttr(id) + '">取消配对</button></div></div>'; }).join("") : '<span class="muted">暂无 Agent</span>';
-      $("instances").innerHTML = instances.length ? instances.map(function (x) { return '<div class="instance"><div class="instance-head"><h3>' + esc(x.displayName) + '</h3><span class="pill ' + escAttr(x.state) + '">' + esc(x.state) + '</span></div><div class=muted>电脑：' + esc(x.agentName || x.agentId) + '</div><code>' + esc(x.agentId + '/' + x.instanceId) + '</code><span class="muted">' + (x.urlAvailable ? '服务地址可用' : '服务未就绪') + '</span><div class="actions"><button data-action="start" data-agent="' + escAttr(x.agentId) + '" data-instance="' + escAttr(x.instanceId) + '">启动</button><button class="danger" data-action="stop" data-agent="' + escAttr(x.agentId) + '" data-instance="' + escAttr(x.instanceId) + '">停止</button><button data-action="restart" data-agent="' + escAttr(x.agentId) + '" data-instance="' + escAttr(x.instanceId) + '">重启</button><button class="secondary" data-action="open" data-agent="' + escAttr(x.agentId) + '" data-instance="' + escAttr(x.instanceId) + '">打开 dsh</button></div></div>'; }).join("") : '<span class="muted">暂无实例</span>';
+      $("instances").innerHTML = instances.length ? instances.map(function (x) {
+        var directPath = "/instances/" + encodeURIComponent(x.agentId) + "/" + encodeURIComponent(x.instanceId);
+        return '<div class="instance"><div class="instance-head"><h3>' + esc(x.displayName) + '</h3><span class="pill ' + escAttr(x.state) + '">' + esc(x.state) + '</span></div><div class=muted>电脑：' + esc(x.agentName || x.agentId) + '</div><code><a href="' + escAttr(directPath) + '" class="direct-link" title="实例直达永久链接">' + esc(x.agentId + '/' + x.instanceId) + '</a></code><span class="muted">' + (x.urlAvailable ? '服务地址可用' : '服务未就绪') + '</span><div class="actions"><button data-action="start" data-agent="' + escAttr(x.agentId) + '" data-instance="' + escAttr(x.instanceId) + '">启动</button><button class="danger" data-action="stop" data-agent="' + escAttr(x.agentId) + '" data-instance="' + escAttr(x.instanceId) + '">停止</button><button data-action="restart" data-agent="' + escAttr(x.agentId) + '" data-instance="' + escAttr(x.instanceId) + '">重启</button><button class="secondary" data-action="open" data-agent="' + escAttr(x.agentId) + '" data-instance="' + escAttr(x.instanceId) + '">打开 dsh</button><button class="secondary" data-action="copy-direct" data-url="' + escAttr(directPath) + '">复制直达链接</button></div></div>';
+      }).join("") : '<span class="muted">暂无实例</span>';
       setNotice("", false);
     } catch (error) {
       const message = error && error.message ? error.message : String(error || "请求失败");
@@ -159,9 +168,38 @@
     try { await api("/api/v1/instances/" + encodeURIComponent(agent) + "/" + encodeURIComponent(instance) + "/commands", { method: "POST", body: JSON.stringify({ action: action }) }); setTimeout(loadData, 500); }
     catch (error) { setNotice(error.message, true); }
   }
-  async function openDsh(agent, instance) {
-    try { const result = await api("/api/v1/instances/" + encodeURIComponent(agent) + "/" + encodeURIComponent(instance) + "/open", { method: "POST" }); window.location.href = result.url || "/"; }
-    catch (error) { setNotice(error.message, true); }
+  function openDsh(agent, instance) {
+    window.location.href = "/instances/" + encodeURIComponent(agent) + "/" + encodeURIComponent(instance);
+  }
+  async function copyDirectUrl(path, button) {
+    const fullUrl = window.location.origin + path;
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+        await navigator.clipboard.writeText(fullUrl);
+      } else {
+        const area = document.createElement("textarea");
+        area.value = fullUrl;
+        area.setAttribute("readonly", "");
+        area.style.position = "fixed";
+        area.style.opacity = "0";
+        document.body.appendChild(area);
+        area.select();
+        document.execCommand("copy");
+        document.body.removeChild(area);
+      }
+      setNotice("已复制直达链接 ✓", false);
+      if (button) {
+        const orig = button.textContent;
+        button.textContent = "已复制 ✓";
+        button.classList.add("copied");
+        setTimeout(function () {
+          button.textContent = orig;
+          button.classList.remove("copied");
+        }, 1500);
+      }
+    } catch (error) {
+      setNotice("复制失败，直达地址: " + fullUrl, true);
+    }
   }
   function confirmRevoke(name) {
     return new Promise(function (resolve) {
@@ -237,7 +275,26 @@
   $("logoutButton").addEventListener("click", logout);
   $("refreshPairing").addEventListener("click", refreshPairing);
   $("copyPairing").addEventListener("click", function (e) { copyText("pairingCode", e.currentTarget); });
-  $("instances").addEventListener("click", function (event) { const button = event.target.closest("button[data-action]"); if (!button) return; const action = button.dataset.action; if (action === "open") openDsh(button.dataset.agent, button.dataset.instance); else command(action, button.dataset.agent, button.dataset.instance); });
+  $("instances").addEventListener("click", function (event) {
+    const button = event.target.closest("button[data-action]");
+    if (!button) return;
+    const action = button.dataset.action;
+    if (action === "open") openDsh(button.dataset.agent, button.dataset.instance);
+    else if (action === "copy-direct") copyDirectUrl(button.dataset.url, button);
+    else command(action, button.dataset.agent, button.dataset.instance);
+  });
   $("agents").addEventListener("click", function (event) { const button = event.target.closest("button[data-action=revoke]"); if (button) revokeAgent(button.dataset.agent, button); });
-  api("/api/v1/auth/me").then(function (result) { showApp(result.username, result.version); return loadData(); }).catch(showLogin);
+  const initParams = new URLSearchParams(window.location.search);
+  const initRedirect = initParams.get("redirect");
+  if (initParams.get("error") === "session_expired") {
+    setNotice("访问的实例会话已失效或实例未就绪，请重新打开实例", true);
+  }
+  api("/api/v1/auth/me").then(function (result) {
+    if (initRedirect && initRedirect.startsWith("/") && !initRedirect.startsWith("//")) {
+      window.location.href = initRedirect;
+      return;
+    }
+    showApp(result.username, result.version);
+    return loadData();
+  }).catch(showLogin);
 })();

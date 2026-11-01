@@ -170,15 +170,20 @@ manager、launcher 和 plugin 的 bootstrap 约定如下：
 6. dsh 的 Set-Cookie 会逐条通过 HTTP tunnel 返回，但 manager 会将上游 Cookie 的 Path 隔离到 `/dsh/<session>/`，并为每个实例维护带 Path/过期时间的 Cookie jar；后续 HTTP/WS 请求从对应实例 jar 重放 Cookie，同时不会向 dsh 转发 manager 自身的 `dsh-session` / `dsh-target` Cookie；
 7. startup URL 不写入 SQLite、Dashboard API、持久化配置或日志。
 
-## dsh UI 代理
+## dsh UI 代理与实例直达 URL
 
-管理员点击「打开 dsh」后得到：
+可通过固定直达 URL 直接打开目标实例：
 
 ```text
-/dsh/<session-id>/
+/instances/<agent-id>/<instance-id>
 ```
 
-manager 代理 HTML、静态资源、REST API、上传下载和 WebSocket。目标 dsh 的 Cookie 值与属性会继续保留，但 Path 会按实例会话隔离；root-relative HTTP/WS 请求由实例会话上下文选择目标并重放对应 jar。
+- **直达免进控制台**：已登录状态下访问该 URL，manager 自动校验 Agent 与实例状态并直达对应 DSH；未登录时引导登录并在成功后自动跳转直达该实例，不再停留在管理面板；
+- **持久化与滑动会话**：代理会话目标在 SQLite 中持久化并在活动时自动滑动续期，manager 重启或长时间使用后刷新仍可自动恢复连接，不再退回面板；
+- **尾斜杠自动纠正**：访问缺少结尾斜杠的 `/dsh/<session-id>` 时自动 307 重定向，避免相对资源路径解析错误；
+- **别名兼容**：支持 `/dsh/<agent-id>/<instance-id>` 以及单实例 Agent 访问 `/instances/<agent-id>`。
+
+管理员在控制台也可点击「打开 dsh」或「复制直达链接」一键获取。底层由 manager 按会话隔离代理 HTML、静态资源、REST API、上传下载和 WebSocket。
 
 ## 远程访问传输优化
 

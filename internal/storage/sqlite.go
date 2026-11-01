@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -96,6 +97,13 @@ CREATE TABLE IF NOT EXISTS instances (
   last_seen_at TEXT,
   PRIMARY KEY (agent_id, instance_id),
   FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS web_targets (
+  session_id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  instance_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL
 );`)
 	if err != nil {
 		return err
@@ -332,4 +340,61 @@ func parseNullableTime(value sql.NullString) *time.Time {
 		return nil
 	}
 	return &parsed
+}
+
+type WebTargetRecord struct {
+	SessionID  string    `json:"sessionId"`
+	AgentID    string    `json:"agentId"`
+	InstanceID string    `json:"instanceId"`
+	CreatedAt  time.Time `json:"createdAt"`
+	LastSeenAt time.Time `json:"lastSeenAt"`
+}
+
+func (db *DB) SaveWebTarget(sessionID, agentID, instanceID string) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := db.sql.Exec(`INSERT INTO web_targets(session_id, agent_id, instance_id, created_at, last_seen_at)
+VALUES(?, ?, ?, ?, ?)
+ON CONFLICT(session_id) DO UPDATE SET last_seen_at=excluded.last_seen_at`, sessionID, agentID, instanceID, now, now)
+	return err
+}
+
+func (db *DB) GetWebTarget(sessionID string) (*WebTargetRecord, error) {
+	row := db.sql.QueryRow(`SELECT session_id, agent_id, instance_id, created_at, last_seen_at FROM web_targets WHERE session_id=?`, sessionID)
+	var rec WebTargetRecord
+	var createdStr, lastSeenStr string
+	if err := row.Scan(&rec.SessionID, &rec.AgentID, &rec.InstanceID, &createdStr, &lastSeenStr); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdStr)
+	rec.LastSeenAt, _ = time.Parse(time.RFC3339Nano, lastSeenStr)
+	return &rec, nil
+}
+
+func (db *DB) TouchWebTarget(sessionID string) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := db.sql.Exec(`UPDATE web_targets SET last_seen_at=? WHERE session_id=?`, now, sessionID)
+	return err
+}
+
+func (db *DB) DeleteWebTarget(sessionID string) error {
+	_, err := db.sql.Exec(`DELETE FROM web_targets WHERE session_id=?`, sessionID)
+	return err
+}
+
+func (db *DB) FindRecentWebTarget(agentID, instanceID string) (*WebTargetRecord, error) {
+	row := db.sql.QueryRow(`SELECT session_id, agent_id, instance_id, created_at, last_seen_at FROM web_targets WHERE agent_id=? AND instance_id=? ORDER BY last_seen_at DESC LIMIT 1`, agentID, instanceID)
+	var rec WebTargetRecord
+	var createdStr, lastSeenStr string
+	if err := row.Scan(&rec.SessionID, &rec.AgentID, &rec.InstanceID, &createdStr, &lastSeenStr); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	rec.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdStr)
+	rec.LastSeenAt, _ = time.Parse(time.RFC3339Nano, lastSeenStr)
+	return &rec, nil
 }

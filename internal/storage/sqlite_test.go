@@ -39,3 +39,60 @@ func TestUpsertHeartbeatReconcilesRemovedInstances(t *testing.T) {
 		t.Fatalf("instances after empty heartbeat=%#v", got)
 	}
 }
+
+func TestWebTargetPersistence(t *testing.T) {
+	db, err := Open(t.TempDir() + "/manager.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// 1. Initially non-existent
+	rec, err := db.GetWebTarget("non-existent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec != nil {
+		t.Fatalf("expected nil record, got %#v", rec)
+	}
+
+	// 2. Save
+	if err := db.SaveWebTarget("dsh-1234", "agent-1", "inst-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. Get
+	rec, err = db.GetWebTarget("dsh-1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec == nil || rec.AgentID != "agent-1" || rec.InstanceID != "inst-1" {
+		t.Fatalf("unexpected record: %#v", rec)
+	}
+
+	// 4. Find recent
+	found, err := db.FindRecentWebTarget("agent-1", "inst-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found == nil || found.SessionID != "dsh-1234" {
+		t.Fatalf("unexpected found target: %#v", found)
+	}
+
+	// 5. Touch
+	if err := db.TouchWebTarget("dsh-1234"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 6. Delete
+	if err := db.DeleteWebTarget("dsh-1234"); err != nil {
+		t.Fatal(err)
+	}
+	rec, err = db.GetWebTarget("dsh-1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec != nil {
+		t.Fatalf("expected nil after delete, got %#v", rec)
+	}
+}
