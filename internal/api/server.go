@@ -1500,6 +1500,14 @@ func websocketCloseReason(reason string) string {
 	return reason[:maxReasonBytes]
 }
 
+func browserTunnelCloseStatus(reason string) websocket.StatusCode {
+	lower := strings.ToLower(reason)
+	if strings.Contains(lower, "overflow") || strings.Contains(lower, "backpressure") || strings.Contains(lower, "reconnect") {
+		return websocket.StatusTryAgainLater
+	}
+	return websocket.StatusNormalClosure
+}
+
 func (s *Server) proxyWebSocket(w http.ResponseWriter, r *http.Request) {
 	sessionID := sessionIDForRequest(r)
 	if sessionID == "" {
@@ -1646,7 +1654,7 @@ func (s *Server) proxyWebSocket(w http.ResponseWriter, r *http.Request) {
 				}
 			case "proxy_ws_close":
 				tunnel.release(msg)
-				_ = browser.Close(websocket.StatusNormalClosure, websocketCloseReason(msg.Error))
+				_ = browser.Close(browserTunnelCloseStatus(msg.Error), websocketCloseReason(msg.Error))
 				return
 			}
 			tunnel.release(msg)

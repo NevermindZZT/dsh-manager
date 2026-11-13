@@ -17,6 +17,23 @@ import (
 	"github.com/coder/websocket"
 )
 
+func TestBrowserTunnelCloseStatus(t *testing.T) {
+	for _, test := range []struct {
+		error string
+		want  websocket.StatusCode
+	}{
+		{error: "manager outbound WebSocket queue overflow", want: websocket.StatusTryAgainLater},
+		{error: "browser websocket backpressure; reconnect", want: websocket.StatusTryAgainLater},
+		{error: "local dsh websocket closed", want: websocket.StatusNormalClosure},
+	} {
+		t.Run(test.error, func(t *testing.T) {
+			if got := browserTunnelCloseStatus(test.error); got != test.want {
+				t.Fatalf("close status=%v want=%v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestBrowserWebSocketTunnelRelaysFrames(t *testing.T) {
 	db, err := storage.Open(t.TempDir() + "/manager.db")
 	if err != nil {
