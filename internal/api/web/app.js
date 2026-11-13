@@ -46,13 +46,15 @@
     const time = formatTime(data.time);
     const agentMarkup = agents.length ? agents.map(function (agent) {
       const queue = numberValue(agent.criticalQueue) + numberValue(agent.interactiveQueue) + numberValue(agent.bulkQueue);
-      return '<div class="diagnostic-agent"><div class="diagnostic-agent-header"><code>' + esc(agent.agentId || "未知 Agent") + '</code><span class="pill online">在线</span></div><div class="diagnostic-agent-meta"><span>活跃 HTTP：' + esc(agent.activeHTTP) + '</span><span>队列：' + esc(queue) + '</span><span>关键队列：' + esc(agent.criticalQueue) + '</span></div></div>';
+      return '<div class="diagnostic-agent"><div class="diagnostic-agent-header"><code>' + esc(agent.agentId || "未知 Agent") + '</code><span class="pill online">在线</span></div><div class="diagnostic-agent-meta"><span>活跃 HTTP：' + esc(agent.activeHTTP) + '</span><span>HTTP 等待：' + esc(agent.queuedHTTP || 0) + '</span><span>队列：' + esc(queue) + '</span><span>关键队列：' + esc(agent.criticalQueue) + '</span></div></div>';
     }).join("") : '<div class="diagnostics-empty">暂无在线 Agent</div>';
     return '<div class="diagnostics-meta"><span><span class="status-dot online"></span> 已连接 Agent <strong>' + esc(agents.length) + '</strong></span><span>活跃 HTTP <strong>' + esc(activeHTTP) + '</strong></span><span>待处理队列 <strong>' + esc(queued) + '</strong></span></div>'
       + '<div class="diagnostics-section"><span class="diagnostics-section-title">代理转发</span><div class="diagnostic-grid">'
       + metric("HTTP 拒绝", proxy.httpRejected, numberValue(proxy.httpRejected) > 0)
+      + metric("HTTP 排队", proxy.httpQueueWaits, numberValue(proxy.httpQueueWaits) > 0)
+      + metric("HTTP 队列拒绝", proxy.httpQueueRejected, numberValue(proxy.httpQueueRejected) > 0)
       + metric("流队列溢出", proxy.streamOverflow, numberValue(proxy.streamOverflow) > 0)
-      + metric("Tunnel 丢弃", proxy.tunnelDropped, numberValue(proxy.tunnelDropped) > 0)
+      + metric("Tunnel 溢出重连", proxy.tunnelOverflow, numberValue(proxy.tunnelOverflow) > 0)
       + metric("WS 心跳失败", proxy.wsHeartbeatFailed, numberValue(proxy.wsHeartbeatFailed) > 0)
       + metric("写入错误", outbound.writeErrors, numberValue(outbound.writeErrors) > 0)
       + '</div></div>'

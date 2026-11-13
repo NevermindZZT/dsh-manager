@@ -34,14 +34,17 @@ import (
 const (
 	agentMessageReadLimit          = 64 << 20
 	proxyHTTPTimeout               = 5 * time.Minute
+	proxyHTTPQueueWait             = time.Minute
 	proxyWebSocketTimeout          = 45 * time.Second
 	proxyWebSocketHeartbeatEvery   = 20 * time.Second
-	proxyWebSocketHeartbeatTimeout = 5 * time.Second
+	proxyWebSocketHeartbeatTimeout = 15 * time.Second
 	proxyChunkSize                 = 64 << 10
 	proxyRequestMaxBytes           = 64 << 20
 	proxyStreamQueue               = 8
-	tunnelQueue                    = 32
+	tunnelQueue                    = 128
+	tunnelQueueMaxBytes            = agentMessageReadLimit + (1 << 20)
 	proxyHTTPMaxInFlight           = 16
+	proxyHTTPMaxQueued             = 32
 	adminSessionDuration           = 30 * 24 * time.Hour
 	adminSessionCookieMaxAge       = 30 * 86400
 )
@@ -71,7 +74,7 @@ type Server struct {
 	pendingMu                sync.Mutex
 	pending                  map[string]*proxyStream
 	tunnelMu                 sync.Mutex
-	tunnels                  map[string]chan agentMessage
+	tunnels                  map[string]*browserTunnel
 	webTargetsMu             sync.RWMutex
 	webTargets               map[string]webTarget
 	sessionsAuthMu           sync.Mutex
@@ -81,6 +84,70 @@ type Server struct {
 	compactHeartbeatInterval time.Duration // zero uses compactHeartbeatEvery
 	compactProxyTimeout      time.Duration // zero uses proxyHTTPTimeout
 	compactWriteGrace        time.Duration // zero uses compactTerminalWriteGrace
+}
+
+type browserTunnel struct {
+	messages    chan agentMessage
+	overflow    chan struct{}
+	cancel      context.CancelFunc
+	failed      atomic.Bool
+	queuedBytes atomic.Int64
+}
+
+func newBrowserTunnel(cancel context.CancelFunc) *browserTunnel {
+	return &browserTunnel{messages: make(chan agentMessage, tunnelQueue), overflow: make(chan struct{}), cancel: cancel}
+}
+
+func tunnelMessageSize(message agentMessage) int64 {
+	size := int64(512 + len(message.Type) + len(message.RequestID) + len(message.InstanceID) + len(message.Error) + len(message.Body) + len(message.FrameType))
+	if message.BodyBytes != nil {
+		size += int64(len(message.BodyBytes))
+	}
+	for name, value := range message.Headers {
+		size += int64(len(name) + len(value))
+	}
+	for _, cookie := range message.SetCookies {
+		size += int64(len(cookie))
+	}
+	return size
+}
+
+func (tunnel *browserTunnel) enqueue(message agentMessage) bool {
+	if tunnel == nil || tunnel.failed.Load() {
+		return false
+	}
+	size := tunnelMessageSize(message)
+	if size <= 0 || size > tunnelQueueMaxBytes {
+		return false
+	}
+	if tunnel.queuedBytes.Add(size) > tunnelQueueMaxBytes {
+		tunnel.queuedBytes.Add(-size)
+		return false
+	}
+	select {
+	case tunnel.messages <- message:
+		return true
+	default:
+		tunnel.queuedBytes.Add(-size)
+		return false
+	}
+}
+
+func (tunnel *browserTunnel) release(message agentMessage) {
+	if tunnel != nil {
+		tunnel.queuedBytes.Add(-tunnelMessageSize(message))
+	}
+}
+
+func (tunnel *browserTunnel) abort() bool {
+	if tunnel == nil || !tunnel.failed.CompareAndSwap(false, true) {
+		return false
+	}
+	close(tunnel.overflow)
+	if tunnel.cancel != nil {
+		tunnel.cancel()
+	}
+	return true
 }
 
 type webTarget struct {
@@ -105,12 +172,18 @@ type agentSession struct {
 	hasCapabilities  bool
 	startupAvailable map[string]bool
 	activeHTTP       atomic.Int64
+	httpWaiters      atomic.Int64
+	httpSlotsOnce    sync.Once
+	httpSlots        chan struct{}
 }
 
 type proxyStats struct {
 	httpRejected      atomic.Uint64
+	httpQueueWaits    atomic.Uint64
+	httpQueueRejected atomic.Uint64
 	streamOverflow    atomic.Uint64
-	tunnelDropped     atomic.Uint64
+	tunnelDropped     atomic.Uint64 // Legacy counter retained for diagnostics clients.
+	tunnelOverflow    atomic.Uint64
 	wsOpenSent        atomic.Uint64
 	wsOpenAcked       atomic.Uint64
 	wsOpenFailed      atomic.Uint64
@@ -118,20 +191,50 @@ type proxyStats struct {
 	wsClosed          atomic.Uint64
 }
 
+func (s *agentSession) httpGate() chan struct{} {
+	s.httpSlotsOnce.Do(func() { s.httpSlots = make(chan struct{}, proxyHTTPMaxInFlight) })
+	return s.httpSlots
+}
+
 func (s *agentSession) tryAcquireHTTP() bool {
-	for {
-		active := s.activeHTTP.Load()
-		if active >= proxyHTTPMaxInFlight {
-			return false
-		}
-		if s.activeHTTP.CompareAndSwap(active, active+1) {
-			return true
-		}
+	select {
+	case s.httpGate() <- struct{}{}:
+		s.activeHTTP.Add(1)
+		return true
+	default:
+		return false
+	}
+}
+
+// acquireHTTP keeps the per-Agent work limit while allowing short request bursts
+// to queue instead of failing immediately (notably concurrent file uploads).
+func (s *agentSession) acquireHTTP(ctx context.Context) (acquired, queued bool) {
+	if s.tryAcquireHTTP() {
+		return true, false
+	}
+	if s.httpWaiters.Add(1) > proxyHTTPMaxQueued {
+		s.httpWaiters.Add(-1)
+		return false, false
+	}
+	defer s.httpWaiters.Add(-1)
+	waitCtx, cancel := context.WithTimeout(ctx, proxyHTTPQueueWait)
+	defer cancel()
+	select {
+	case s.httpGate() <- struct{}{}:
+		s.activeHTTP.Add(1)
+		return true, true
+	case <-waitCtx.Done():
+		return false, true
 	}
 }
 
 func (s *agentSession) releaseHTTP() {
-	s.activeHTTP.Add(-1)
+	select {
+	case <-s.httpGate():
+		s.activeHTTP.Add(-1)
+	default:
+		// Keep isolated tests and stale cleanup fail-safe instead of going negative.
+	}
 }
 
 type enrollRequest struct {
@@ -157,7 +260,7 @@ func NewServer(cfg config.Config, db *storage.DB, logger *slog.Logger) *Server {
 	if db != nil {
 		_ = db.CleanExpiredAuthSessions()
 	}
-	return &Server{cfg: cfg, db: db, logger: logger, pairingCode: cfg.PairingCode, sessions: make(map[string]*agentSession), pending: make(map[string]*proxyStream), tunnels: make(map[string]chan agentMessage), webTargets: make(map[string]webTarget), authSessions: make(map[string]time.Time), rewrittenJSCache: newRewrittenJSCache(rewrittenJSCacheBytes)}
+	return &Server{cfg: cfg, db: db, logger: logger, pairingCode: cfg.PairingCode, sessions: make(map[string]*agentSession), pending: make(map[string]*proxyStream), tunnels: make(map[string]*browserTunnel), webTargets: make(map[string]webTarget), authSessions: make(map[string]time.Time), rewrittenJSCache: newRewrittenJSCache(rewrittenJSCacheBytes)}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -205,7 +308,7 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) Run(ctx context.Context) error {
-	httpServer := &http.Server{Addr: s.cfg.HTTPAddr, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: proxyHTTPTimeout, IdleTimeout: 60 * time.Second}
+	httpServer := &http.Server{Addr: s.cfg.HTTPAddr, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: proxyHTTPTimeout, WriteTimeout: proxyHTTPTimeout, IdleTimeout: 60 * time.Second}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -369,7 +472,7 @@ func (s *Server) adminDiagnostics(w http.ResponseWriter, r *http.Request) {
 		}
 		queues["enqueued"], queues["dequeued"], queues["rejected"] = enqueued, dequeued, rejected
 		queues["writeErrors"] = queues["writeErrors"].(uint64) + snapshot.WriteErrors
-		agents = append(agents, map[string]any{"agentId": agentID, "activeHTTP": session.activeHTTP.Load(), "criticalQueue": snapshot.CriticalQueue, "interactiveQueue": snapshot.InteractiveQueue, "bulkQueue": snapshot.BulkQueue})
+		agents = append(agents, map[string]any{"agentId": agentID, "activeHTTP": session.activeHTTP.Load(), "queuedHTTP": session.httpWaiters.Load(), "criticalQueue": snapshot.CriticalQueue, "interactiveQueue": snapshot.InteractiveQueue, "bulkQueue": snapshot.BulkQueue})
 	}
 	s.sessionsMu.RUnlock()
 	cache := s.rewrittenJSCache.snapshot()
@@ -377,8 +480,11 @@ func (s *Server) adminDiagnostics(w http.ResponseWriter, r *http.Request) {
 		"time": time.Now().UTC(), "version": version.Version,
 		"proxy": map[string]uint64{
 			"httpRejected":      s.proxyStats.httpRejected.Load(),
+			"httpQueueWaits":    s.proxyStats.httpQueueWaits.Load(),
+			"httpQueueRejected": s.proxyStats.httpQueueRejected.Load(),
 			"streamOverflow":    s.proxyStats.streamOverflow.Load(),
 			"tunnelDropped":     s.proxyStats.tunnelDropped.Load(),
+			"tunnelOverflow":    s.proxyStats.tunnelOverflow.Load(),
 			"wsOpenSent":        s.proxyStats.wsOpenSent.Load(),
 			"wsOpenAcked":       s.proxyStats.wsOpenAcked.Load(),
 			"wsOpenFailed":      s.proxyStats.wsOpenFailed.Load(),
@@ -901,16 +1007,15 @@ func (s *Server) pendingStream(requestID string) *proxyStream {
 
 func (s *Server) dispatchTunnelMessage(requestID string, message agentMessage) {
 	s.tunnelMu.Lock()
-	ch := s.tunnels[requestID]
+	tunnel := s.tunnels[requestID]
 	s.tunnelMu.Unlock()
-	if ch == nil {
+	if tunnel == nil || tunnel.enqueue(message) {
 		return
 	}
-	select {
-	case ch <- message:
-	default:
-		dropped := s.proxyStats.tunnelDropped.Add(1)
-		s.logger.Warn("dropping agent websocket tunnel message for slow browser", "requestId", requestID, "type", message.Type, "dropped", dropped)
+	if tunnel.abort() {
+		overflows := s.proxyStats.tunnelOverflow.Add(1)
+		s.logger.Warn("aborting browser websocket tunnel for slow browser; client will reconnect from a fresh baseline",
+			"requestId", requestID, "type", message.Type, "queuedBytes", tunnel.queuedBytes.Load(), "overflows", overflows)
 	}
 }
 
@@ -1427,13 +1532,15 @@ func (s *Server) proxyWebSocket(w http.ResponseWriter, r *http.Request) {
 	browser.SetReadLimit(32 << 20)
 	defer browser.CloseNow()
 	requestID := "ws-" + randomHex(12)
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	tunnel := newBrowserTunnel(cancel)
 	defer func() {
 		s.proxyStats.wsClosed.Add(1)
 		s.logger.Info("browser websocket tunnel closed", "requestId", requestID, "agentId", agentID, "instanceId", instanceID, "path", r.URL.Path)
 	}()
-	agentCh := make(chan agentMessage, tunnelQueue)
 	s.tunnelMu.Lock()
-	s.tunnels[requestID] = agentCh
+	s.tunnels[requestID] = tunnel
 	s.tunnelMu.Unlock()
 	defer func() { s.tunnelMu.Lock(); delete(s.tunnels, requestID); s.tunnelMu.Unlock() }()
 	binaryFrames := supportsCapability(session, "proxy.binary-websocket-frame-v1")
@@ -1453,12 +1560,17 @@ func (s *Server) proxyWebSocket(w http.ResponseWriter, r *http.Request) {
 		_ = browser.Close(websocket.StatusTryAgainLater, "agent tunnel unavailable")
 		return
 	}
-	ctx, cancel := context.WithCancel(r.Context())
-	defer cancel()
+	closeOverflowedTunnel := func() {
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = s.writeAgentJSONPriority(closeCtx, session, agentMessage{Type: "proxy_ws_close", RequestID: requestID, Error: "manager tunnel queue overflow; reconnect browser stream"}, outboundCritical)
+		closeCancel()
+		_ = browser.Close(websocket.StatusTryAgainLater, "tunnel overloaded; reconnecting")
+	}
 	openTimer := time.NewTimer(proxyWebSocketTimeout)
 	defer openTimer.Stop()
 	select {
-	case msg := <-agentCh:
+	case msg := <-tunnel.messages:
+		tunnel.release(msg)
 		if msg.Type != "proxy_ws_open_result" || msg.OK == nil || !*msg.OK {
 			s.proxyStats.wsOpenFailed.Add(1)
 			reason := websocketCloseReason(msg.Error)
@@ -1468,10 +1580,19 @@ func (s *Server) proxyWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 		s.proxyStats.wsOpenAcked.Add(1)
 		s.logger.Info("browser websocket tunnel opened", "requestId", requestID, "agentId", agentID, "instanceId", instanceID, "path", r.URL.Path)
+	case <-tunnel.overflow:
+		s.proxyStats.wsOpenFailed.Add(1)
+		closeOverflowedTunnel()
+		return
 	case <-openTimer.C:
 		s.proxyStats.wsOpenFailed.Add(1)
 		s.logger.Warn("browser websocket open timed out", "requestId", requestID, "agentId", agentID, "instanceId", instanceID, "path", r.URL.Path, "timeout", proxyWebSocketTimeout.String())
 		_ = browser.Close(websocket.StatusTryAgainLater, "tunnel open timeout")
+		return
+	case <-ctx.Done():
+		if tunnel.failed.Load() {
+			closeOverflowedTunnel()
+		}
 		return
 	}
 	heartbeatErrors := startBrowserWebSocketHeartbeat(ctx, browser, proxyWebSocketHeartbeatEvery, proxyWebSocketHeartbeatTimeout)
@@ -1498,7 +1619,12 @@ func (s *Server) proxyWebSocket(w http.ResponseWriter, r *http.Request) {
 	}()
 	for {
 		select {
-		case msg := <-agentCh:
+		case msg := <-tunnel.messages:
+			if tunnel.failed.Load() {
+				tunnel.release(msg)
+				closeOverflowedTunnel()
+				return
+			}
 			switch msg.Type {
 			case "proxy_ws_frame", "proxy_ws_frame_binary":
 				data := msg.BodyBytes
@@ -1506,6 +1632,7 @@ func (s *Server) proxyWebSocket(w http.ResponseWriter, r *http.Request) {
 					var e error
 					data, e = base64.StdEncoding.DecodeString(msg.Body)
 					if e != nil {
+						tunnel.release(msg)
 						continue
 					}
 				}
@@ -1514,12 +1641,18 @@ func (s *Server) proxyWebSocket(w http.ResponseWriter, r *http.Request) {
 					mt = websocket.MessageBinary
 				}
 				if err := browser.Write(ctx, mt, data); err != nil {
+					tunnel.release(msg)
 					return
 				}
 			case "proxy_ws_close":
+				tunnel.release(msg)
 				_ = browser.Close(websocket.StatusNormalClosure, websocketCloseReason(msg.Error))
 				return
 			}
+			tunnel.release(msg)
+		case <-tunnel.overflow:
+			closeOverflowedTunnel()
+			return
 		case frame := <-frames:
 			if frame.Type == "proxy_ws_frame_binary" {
 				if err := writeAgentBinary(ctx, session, frame, frame.BodyBytes); err != nil {
@@ -1548,6 +1681,9 @@ func (s *Server) proxyWebSocket(w http.ResponseWriter, r *http.Request) {
 			_ = browser.Close(websocket.StatusTryAgainLater, "browser heartbeat failed")
 			return
 		case <-ctx.Done():
+			if tunnel.failed.Load() {
+				closeOverflowedTunnel()
+			}
 			return
 		}
 	}
@@ -1674,10 +1810,18 @@ func (s *Server) proxyHTTPForTarget(w http.ResponseWriter, r *http.Request, targ
 			return
 		}
 	}
-	if !session.tryAcquireHTTP() {
+	acquiredHTTP, waitedHTTP := session.acquireHTTP(r.Context())
+	if waitedHTTP {
+		s.proxyStats.httpQueueWaits.Add(1)
+	}
+	if !acquiredHTTP {
+		if r.Context().Err() != nil {
+			return
+		}
 		rejected := s.proxyStats.httpRejected.Add(1)
+		s.proxyStats.httpQueueRejected.Add(1)
 		w.Header().Set("Retry-After", "1")
-		s.logger.Warn("proxy request rejected at per-agent limit", "agentId", agentID, "instanceId", instanceID, "limit", proxyHTTPMaxInFlight, "rejected", rejected)
+		s.logger.Warn("proxy request rejected after bounded per-agent queue", "agentId", agentID, "instanceId", instanceID, "limit", proxyHTTPMaxInFlight, "queueLimit", proxyHTTPMaxQueued, "rejected", rejected, "error", r.Context().Err())
 		http.Error(w, "too many active proxy requests", http.StatusTooManyRequests)
 		return
 	}

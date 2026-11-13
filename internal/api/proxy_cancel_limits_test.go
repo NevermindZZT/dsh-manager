@@ -62,13 +62,57 @@ func TestProxyHTTPClientCancellationSendsNegotiatedCancel(t *testing.T) {
 	}
 }
 
-func TestProxyHTTPPerAgentLimitReturns429(t *testing.T) {
+func TestProxyHTTPPerAgentLimitWaitsForSlot(t *testing.T) {
+	session := &agentSession{agentID: "limited"}
+	for range proxyHTTPMaxInFlight {
+		if !session.tryAcquireHTTP() {
+			t.Fatal("failed to fill HTTP proxy slots")
+		}
+	}
+
+	type acquireResult struct {
+		acquired bool
+		queued   bool
+	}
+	result := make(chan acquireResult, 1)
+	go func() {
+		acquired, queued := session.acquireHTTP(context.Background())
+		result <- acquireResult{acquired: acquired, queued: queued}
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for session.httpWaiters.Load() != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := session.httpWaiters.Load(); got != 1 {
+		t.Fatalf("queued HTTP requests=%d, want 1", got)
+	}
+	session.releaseHTTP()
+	select {
+	case got := <-result:
+		if !got.acquired || !got.queued {
+			t.Fatalf("acquire result=%#v, want acquired and queued", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("queued HTTP request did not acquire the released slot")
+	}
+	for range proxyHTTPMaxInFlight {
+		session.releaseHTTP()
+	}
+	if got := session.activeHTTP.Load(); got != 0 {
+		t.Fatalf("active HTTP=%d", got)
+	}
+}
+
+func TestProxyHTTPPerAgentLimitStillBoundsQueue(t *testing.T) {
 	session := &agentSession{agentID: "limited", hasCapabilities: true, capabilities: []string{"proxy.http"}}
 	for range proxyHTTPMaxInFlight {
 		if !session.tryAcquireHTTP() {
 			t.Fatal("failed to fill HTTP proxy slots")
 		}
 	}
+	// Simulate a saturated bounded waiting room so the handler can fail fast.
+	session.httpWaiters.Store(proxyHTTPMaxQueued)
 	srv := &Server{logger: slog.New(slog.NewTextHandler(io.Discard, nil)), sessions: map[string]*agentSession{"limited": session}}
 	req := httptest.NewRequest(http.MethodGet, "/asset", nil)
 	res := httptest.NewRecorder()
@@ -82,11 +126,12 @@ func TestProxyHTTPPerAgentLimitReturns429(t *testing.T) {
 	if got := srv.proxyStats.httpRejected.Load(); got != 1 {
 		t.Fatalf("rejected=%d", got)
 	}
+	if got := srv.proxyStats.httpQueueRejected.Load(); got != 1 {
+		t.Fatalf("queue rejected=%d", got)
+	}
+	session.httpWaiters.Store(0)
 	for range proxyHTTPMaxInFlight {
 		session.releaseHTTP()
-	}
-	if got := session.activeHTTP.Load(); got != 0 {
-		t.Fatalf("active HTTP=%d", got)
 	}
 }
 
@@ -109,12 +154,49 @@ func TestStreamOverflowIncrementsCounter(t *testing.T) {
 	}
 }
 
-func TestTunnelDropIncrementsCounter(t *testing.T) {
-	ch := make(chan agentMessage, 1)
-	ch <- agentMessage{}
-	srv := &Server{logger: slog.New(slog.NewTextHandler(io.Discard, nil)), tunnels: map[string]chan agentMessage{"ws-overflow": ch}}
-	srv.dispatchTunnelMessage("ws-overflow", agentMessage{Type: "proxy_ws_frame"})
-	if got := srv.proxyStats.tunnelDropped.Load(); got != 1 {
-		t.Fatalf("tunnel drops=%d", got)
+func TestTunnelOverflowAbortsForRecoverableReconnect(t *testing.T) {
+	cancelled := make(chan struct{})
+	tunnel := &browserTunnel{
+		messages: make(chan agentMessage, 1),
+		overflow: make(chan struct{}),
+		cancel:   func() { close(cancelled) },
+	}
+	tunnel.messages <- agentMessage{Type: "proxy_ws_frame", Body: "queued"}
+	srv := &Server{logger: slog.New(slog.NewTextHandler(io.Discard, nil)), tunnels: map[string]*browserTunnel{"ws-overflow": tunnel}}
+	srv.dispatchTunnelMessage("ws-overflow", agentMessage{Type: "proxy_ws_frame", Body: "overflow"})
+	if !tunnel.failed.Load() {
+		t.Fatal("full tunnel queue must abort the logical WebSocket")
+	}
+	select {
+	case <-tunnel.overflow:
+	default:
+		t.Fatal("overflow signal was not delivered")
+	}
+	select {
+	case <-cancelled:
+	default:
+		t.Fatal("overflow did not cancel the blocked browser write context")
+	}
+	if got := srv.proxyStats.tunnelOverflow.Load(); got != 1 {
+		t.Fatalf("tunnel overflow=%d, want 1", got)
+	}
+	if got := srv.proxyStats.tunnelDropped.Load(); got != 0 {
+		t.Fatalf("legacy silent-drop counter=%d, want 0", got)
+	}
+}
+
+func TestTunnelQueuePreservesFramesWithinBudget(t *testing.T) {
+	tunnel := newBrowserTunnel(nil)
+	message := agentMessage{Type: "proxy_ws_frame", Body: "in-order"}
+	if !tunnel.enqueue(message) {
+		t.Fatal("expected frame to fit in empty tunnel queue")
+	}
+	got := <-tunnel.messages
+	if got.Body != message.Body {
+		t.Fatalf("body=%q, want %q", got.Body, message.Body)
+	}
+	tunnel.release(got)
+	if queued := tunnel.queuedBytes.Load(); queued != 0 {
+		t.Fatalf("queued bytes=%d, want 0", queued)
 	}
 }
